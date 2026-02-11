@@ -12,7 +12,7 @@ import (
 
 func main() {
 	numPeers := 3
-	applyCh := make(chan raftapi.ApplyMsg, 100)
+	applyChs := make([]chan raftapi.ApplyMsg, numPeers)
 
 	// 创建虚拟网络
 	net := labrpc.MakeNetwork()
@@ -30,7 +30,8 @@ func main() {
 		peers[i] = net.MakeEnd(fmt.Sprintf("peer%d", i))
 
 		// 创建 Server 并注册 Raft 服务
-		rf := raft.Make(peers, i, persisters[i], applyCh).(*raft.Raft)
+		applyChs[i] = make(chan raftapi.ApplyMsg, 100)
+		rf := raft.Make(peers, i, persisters[i], applyChs[i]).(*raft.Raft)
 		rfs[i] = rf
 		servers[i] = labrpc.MakeServer()
 		servers[i].AddService(labrpc.MakeService(rf))
@@ -57,7 +58,7 @@ func main() {
 	}()
 
 	// 接收 ApplyMsg
-	for msg := range applyCh {
-		fmt.Println("[ApplyMsg]", msg)
+	for msg := range applyChs[0] {
+		fmt.Println("applychs[0]:\n", msg)
 	}
 }
