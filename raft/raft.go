@@ -14,10 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
 	"mcy-kv/labgob"
-	"mcy-kv/labrpc"
 	"mcy-kv/raftapi"
+	"mcy-kv/transport"
 
 	persister "mcy-kv/labpersister"
 )
@@ -31,10 +30,11 @@ const (
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex           // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd  // RPC end points of all peers
+	peers     map[int]string       // RPC end points of all peers
 	persister *persister.Persister // Object to hold this peer's persisted state
 	me        int                  // this peer's index into peers[]
 	dead      int32                // set by Kill()
+	transport transport.Transport
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
@@ -279,14 +279,14 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		return
+		return nil
 	}
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
@@ -310,6 +310,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	}
+	return nil
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -340,12 +341,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	ok := rf.transport.Call(server, "Raft.RequestVote", args, reply)
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	ok := rf.transport.Call(server, "Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -364,7 +365,7 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 	}
 	rf.mu.Unlock()
 	var reply InstallSnapshotReply
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply)
+	ok := rf.transport.Call(server, "Raft.InstallSnapshot", &args, &reply)
 	if !ok {
 		return
 	}
@@ -584,13 +585,13 @@ func (rf *Raft) sendHeartbeats() {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs,
-	reply *AppendEntriesReply) {
+	reply *AppendEntriesReply) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		return
+		return nil
 	}
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
@@ -603,13 +604,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs,
 		reply.Success = false
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = rf.lastIncludedIndex + 1
-		return
+		return nil
 	}
 	if args.PrevLogIndex > rf.getLastIndex() {
 		reply.Success = false
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = rf.getLastIndex() + 1
-		return
+		return nil
 	}
 	if rf.termAt(args.PrevLogIndex) != args.PrevLogTerm {
 		reply.Success = false
@@ -619,7 +620,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs,
 			idx--
 		}
 		reply.ConflictIndex = idx
-		return
+		return nil
 	}
 	index := args.PrevLogIndex + 1
 	for i, entry := range args.Entries {
@@ -640,6 +641,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs,
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastIndex())
 	}
 	reply.Success = true
+	return nil
 }
 
 func (rf *Raft) updateCommitIndex() {
@@ -690,12 +692,12 @@ func (rf *Raft) applier() {
 	}
 }
 
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		rf.mu.Unlock()
-		return
+		return nil
 	}
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
@@ -703,7 +705,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.electionTime = time.Now()
 	if args.LastIncludedIndex <= rf.lastIncludedIndex {
 		rf.mu.Unlock()
-		return
+		return nil
 	}
 	if rf.judgeIdx(args.LastIncludedIndex) &&
 		rf.termAt(args.LastIncludedIndex) == args.LastIncludedTerm {
@@ -730,6 +732,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotIndex: rf.lastIncludedIndex,
 		SnapshotTerm:  rf.lastIncludedTerm,
 	}
+	return nil
 }
 
 func (rf *Raft) ticker() {
@@ -761,12 +764,13 @@ func (rf *Raft) ticker() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-func Make(peers []*labrpc.ClientEnd, me int,
+func Make(peers map[int]string, me int, t transport.Transport,
 	persister *persister.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.transport = t
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.state = Follower
