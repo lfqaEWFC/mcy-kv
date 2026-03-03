@@ -13,11 +13,11 @@ import (
 
 func main() {
 	peers := map[int]string{
-		0: "127.0.0.1:8001",
-		1: "127.0.0.1:8002",
-		2: "127.0.0.1:8003",
-		3: "127.0.0.1:8004",
-		4: "127.0.0.1:8005",
+		0: "10.49.114.181:8001",
+		1: "10.49.114.181:8002",
+		2: "10.49.114.181:8003",
+		3: "10.49.114.181:8004",
+		4: "10.49.114.181:8005",
 	}
 
 	id := flag.Int("id", -1, "server id")
@@ -33,7 +33,6 @@ func main() {
 
 	t := transport.NewHTTPTransport(
 		me,
-		peers[me],
 		peers,
 	)
 
@@ -45,9 +44,10 @@ func main() {
 		applyCh,
 	)
 
-	_ = kv.NewServer(rf, applyCh)
+	kvsrv := kv.NewServer(rf, applyCh)
 
 	t.Register(rf)
+	t.Register(kvsrv)
 
 	if err := t.Start(); err != nil {
 		panic(err)

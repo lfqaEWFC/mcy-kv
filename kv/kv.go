@@ -3,6 +3,7 @@ package kv
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"mcy-kv/raftapi"
 )
@@ -28,22 +29,27 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
 	}
 
 	go kv.applier()
+	go func() {
+		fmt.Printf("sleeping...")
+		time.Sleep(10 * time.Second)
+		fmt.Printf("awake!")
+		kv.rf.Start("hello")
+	}()
 
 	return kv
 }
 
 func (kv *KVServer) applier() {
 	for msg := range kv.applyCh {
-		if msg.CommandValid {
-			op := msg.Command.(Op)
-
-			kv.mu.Lock()
-			switch op.Type {
-			case "Put":
-				kv.kv[op.Key] = op.Value
-				fmt.Printf("[apply] %s=%s\n", op.Key, op.Value)
-			}
-			kv.mu.Unlock()
+		if !msg.CommandValid {
+			continue
 		}
+
+		s, ok := msg.Command.(string)
+		if !ok {
+			panic("unexpected command type")
+		}
+
+		fmt.Println("[apply string]", s)
 	}
 }

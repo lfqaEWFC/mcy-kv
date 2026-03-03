@@ -9,6 +9,7 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -435,7 +436,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) randElectionTimeout() time.Duration {
-	return time.Duration(300+rand.Int63()%100) * time.Millisecond
+	return time.Duration(500+rand.Int63()%500) * time.Millisecond
 }
 
 func (rf *Raft) becomeFollower(term int) {
@@ -458,12 +459,14 @@ func (rf *Raft) becomeLeader() {
 	}
 	rf.nextIndex[rf.me] = lastIdx + 1
 	rf.matchIndex[rf.me] = lastIdx
+	fmt.Printf("leader is me ...%d\n", rf.me)
 }
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.state = Candidate
 	rf.currentTerm += 1
+	fmt.Printf("Server %d starts election for term %d\n", rf.me, rf.currentTerm)
 	term := rf.currentTerm
 	LastLogIndex := rf.getLastIndex()
 	LastLogTerm := rf.termAt(LastLogIndex)

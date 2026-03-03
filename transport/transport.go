@@ -18,11 +18,10 @@ type Transport interface {
 }
 
 type HTTPTransport struct {
-	selfID     int
-	listenAddr string
-	peers      map[int]string
-	rpcServer  *rpc.Server
-	listener   net.Listener
+	selfID    int
+	peers     map[int]string
+	rpcServer *rpc.Server
+	listener  net.Listener
 }
 
 func (t *HTTPTransport) Register(rcvr interface{}) error {
@@ -31,14 +30,12 @@ func (t *HTTPTransport) Register(rcvr interface{}) error {
 
 func NewHTTPTransport(
 	selfID int,
-	listenAddr string,
 	peers map[int]string,
 ) *HTTPTransport {
 	return &HTTPTransport{
-		selfID:     selfID,
-		listenAddr: listenAddr,
-		peers:      peers,
-		rpcServer:  rpc.NewServer(),
+		selfID:    selfID,
+		peers:     peers,
+		rpcServer: rpc.NewServer(),
 	}
 }
 
@@ -46,7 +43,7 @@ func (t *HTTPTransport) Start() error {
 	mux := http.NewServeMux()
 	mux.Handle(rpc.DefaultRPCPath, t.rpcServer)
 
-	ln, err := net.Listen("tcp", t.listenAddr)
+	ln, err := net.Listen("tcp", t.peers[t.selfID])
 	if err != nil {
 		return err
 	}
