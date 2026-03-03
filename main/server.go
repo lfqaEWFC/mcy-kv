@@ -1,9 +1,10 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"time"
 
+	"mcy-kv/kv"
 	persister "mcy-kv/labpersister"
 	"mcy-kv/raft"
 	"mcy-kv/raftapi"
@@ -11,8 +12,6 @@ import (
 )
 
 func main() {
-	numPeers := 5
-
 	peers := map[int]string{
 		0: "127.0.0.1:8001",
 		1: "127.0.0.1:8002",
@@ -21,63 +20,40 @@ func main() {
 		4: "127.0.0.1:8005",
 	}
 
-	rfs := make([]raftapi.Raft, numPeers)
-	applyChs := make([]chan raftapi.ApplyMsg, numPeers)
+	id := flag.Int("id", -1, "server id")
+	flag.Parse()
+	if *id < 0 {
+		panic("must specify --id")
+	}
+	me := *id
 
-	for i := 0; i < numPeers; i++ {
-		applyChs[i] = make(chan raftapi.ApplyMsg, 100)
+	applyCh := make(chan raftapi.ApplyMsg, 100)
 
-		persister := persister.MakePersister()
+	persister := persister.MakePersister()
 
-		t := transport.NewHTTPTransport(
-			i,
-			peers[i],
-			peers,
-		)
+	t := transport.NewHTTPTransport(
+		me,
+		peers[me],
+		peers,
+	)
 
-		rf := raft.Make(
-			peers,
-			i,
-			t,
-			persister,
-			applyChs[i],
-		)
+	rf := raft.Make(
+		peers,
+		me,
+		t,
+		persister,
+		applyCh,
+	)
 
-		// 注册 Raft RPC
-		t.Register(rf)
+	_ = kv.NewServer(rf, applyCh)
 
-		// 启动监听
-		if err := t.Start(); err != nil {
-			panic(err)
-		}
+	t.Register(rf)
 
-		rfs[i] = rf
+	if err := t.Start(); err != nil {
+		panic(err)
 	}
 
-	// 模拟客户端不断提交
-	go func() {
-		for {
-			time.Sleep(500 * time.Millisecond)
-			for i := 0; i < numPeers; i++ {
-				index, term, isLeader := rfs[i].Start(
-					fmt.Sprintf("cmd at %v", time.Now()),
-				)
-				if isLeader {
-					fmt.Printf(
-						"[Leader %d] submit index=%d term=%d\n",
-						i, index, term,
-					)
-				}
-			}
-		}
-	}()
-
-	// 观察 apply
-	go func() {
-		for msg := range applyChs[0] {
-			fmt.Println("[apply 0]", msg)
-		}
-	}()
+	fmt.Printf("KV Raft server %d listening on %s\n", me, peers[me])
 
 	select {}
 }
