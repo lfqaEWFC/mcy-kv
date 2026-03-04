@@ -35,9 +35,9 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
 
 	go kv.applier()
 	go func() {
-		fmt.Printf("sleeping...")
+		fmt.Printf("sleeping...\n")
 		time.Sleep(10 * time.Second)
-		fmt.Printf("awake!")
+		fmt.Printf("awake!\n")
 		kv.rf.Start(Op{
 			Type:  "Put",
 			Key:   "k1",
@@ -48,23 +48,39 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
 	return kv
 }
 
+func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
+
+}
+
 func (kv *KVServer) applier() {
 	for msg := range kv.applyCh {
-		if !msg.CommandValid {
+		if msg.SnapshotValid {
+			kv.mu.Lock()
+			kv.restoreFromSnapshot(msg.Snapshot)
+			kv.mu.Unlock()
+			fmt.Printf("snapshot valid...\n")
 			continue
 		}
-
+		if !msg.CommandValid {
+			fmt.Printf("error command type...\n")
+			continue
+		}
+		fmt.Printf("command valid...\n")
 		op, ok := msg.Command.(Op)
 		if !ok {
-			panic("unexpected command type (Op expected)")
+			panic("KVServer: unexpected command type\n")
 		}
-
-		fmt.Printf("[apply op] type=%s key=%s value=%s\n",
-			op.Type, op.Key, op.Value)
-
 		kv.mu.Lock()
-		if op.Type == "Put" {
+		switch op.Type {
+		case "Put":
+			fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
 			kv.kv[op.Key] = op.Value
+		case "Append":
+			kv.kv[op.Key] += op.Value
+		case "Get":
+			fmt.Printf("Get operation applied for key: %s\n", op.Key)
+		default:
+			panic("KVServer: unknown op type\n")
 		}
 		kv.mu.Unlock()
 	}

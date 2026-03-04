@@ -790,6 +790,15 @@ func Make(peers map[int]string, me int, t transport.Transport,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	snapshot := rf.persister.ReadSnapshot()
+	if snapshot != nil && len(snapshot) > 0 {
+		rf.applyCh <- raftapi.ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      snapshot,
+			SnapshotIndex: rf.lastIncludedIndex,
+			SnapshotTerm:  rf.lastIncludedTerm,
+		}
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
