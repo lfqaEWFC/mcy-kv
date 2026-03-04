@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"mcy-kv/labgob"
 	"mcy-kv/raftapi"
 )
 
@@ -21,6 +22,10 @@ type KVServer struct {
 	rf      raftapi.Raft
 }
 
+func init() {
+	labgob.Register(Op{})
+}
+
 func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
 	kv := &KVServer{
 		rf:      rf,
@@ -33,7 +38,11 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
 		fmt.Printf("sleeping...")
 		time.Sleep(10 * time.Second)
 		fmt.Printf("awake!")
-		kv.rf.Start("hello")
+		kv.rf.Start(Op{
+			Type:  "Put",
+			Key:   "k1",
+			Value: "v1",
+		})
 	}()
 
 	return kv
@@ -45,11 +54,18 @@ func (kv *KVServer) applier() {
 			continue
 		}
 
-		s, ok := msg.Command.(string)
+		op, ok := msg.Command.(Op)
 		if !ok {
-			panic("unexpected command type")
+			panic("unexpected command type (Op expected)")
 		}
 
-		fmt.Println("[apply string]", s)
+		fmt.Printf("[apply op] type=%s key=%s value=%s\n",
+			op.Type, op.Key, op.Value)
+
+		kv.mu.Lock()
+		if op.Type == "Put" {
+			kv.kv[op.Key] = op.Value
+		}
+		kv.mu.Unlock()
 	}
 }
