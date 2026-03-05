@@ -728,12 +728,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.lastApplied = rf.lastIncludedIndex
 	}
 	rf.persistWithSnapshot(args.Data)
+	data := args.Data
+	term := rf.lastIncludedTerm
+	index := rf.lastIncludedIndex
 	rf.mu.Unlock()
 	rf.applyCh <- raftapi.ApplyMsg{
 		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotIndex: rf.lastIncludedIndex,
-		SnapshotTerm:  rf.lastIncludedTerm,
+		Snapshot:      data,
+		SnapshotIndex: index,
+		SnapshotTerm:  term,
 	}
 	return nil
 }
