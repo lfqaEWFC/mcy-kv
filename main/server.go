@@ -44,7 +44,7 @@ func main() {
 		applyCh,
 	)
 
-	kvsrv := kv.NewServer(rf, applyCh)
+	kvsrv := kv.NewServer(rf, applyCh, 1000)
 
 	t.Register(rf)
 	t.Register(kvsrv)

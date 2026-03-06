@@ -224,6 +224,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	cut := rf.logIdx(index)
 	rf.lastIncludedTerm = rf.termAt(index)
 	rf.lastIncludedIndex = index
+	fmt.Printf("Snapshot : lastindex is %d\n", rf.lastIncludedIndex)
 
 	//丢弃 log
 	newlog := []LogEntry{{Term: rf.lastIncludedTerm, Command: nil}}

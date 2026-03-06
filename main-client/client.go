@@ -15,7 +15,8 @@ func main() {
 	}
 
 	ck := kvclient.MakeClerk(servers)
-
-	ck.Put("x", "1")
-	ck.Put("x", "2")
+	for {
+		ck.Put("x", "1")
+		ck.Put("y", "1")
+	}
 }

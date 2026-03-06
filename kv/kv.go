@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"bytes"
 	"fmt"
 	"mcy-kv/labgob"
 	"mcy-kv/raftapi"
@@ -57,12 +58,13 @@ func init() {
 	labgob.Register(Op{})
 }
 
-func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg) *KVServer {
+func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int) *KVServer {
 	kv := &KVServer{
-		rf:      rf,
-		applyCh: applyCh,
-		kv:      make(map[string]string),
-		lastseq: make(map[int64]int),
+		rf:           rf,
+		applyCh:      applyCh,
+		kv:           make(map[string]string),
+		lastseq:      make(map[int64]int),
+		maxraftstate: maxraftstate,
 	}
 
 	go kv.applier()
@@ -86,7 +88,67 @@ func (kv *KVServer) removeWaitCh(index int) {
 	delete(kv.waitCh, index)
 }
 
-func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {}
+func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) == 0 {
+		return
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	var data struct {
+		KV      map[string]string
+		LastSeq map[int64]int
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&data); err != nil {
+		panic(fmt.Sprintf("KVServer restoreFromSnapshot decode failed: %v", err))
+	}
+
+	kv.kv = data.KV
+	kv.lastseq = data.LastSeq
+}
+
+func (kv *KVServer) maybeTakeSnapshot() {
+	if kv.maxraftstate <= 0 {
+		return
+	}
+
+	kv.mu.Lock()
+	if kv.rf.PersistBytes() < kv.maxraftstate {
+		fmt.Printf("no need to snap: current size %d, max size %d\n", kv.rf.PersistBytes(), kv.maxraftstate)
+		kv.mu.Unlock()
+		return
+	}
+	fmt.Printf("need to snap: current size %d, max size %d\n", kv.rf.PersistBytes(), kv.maxraftstate)
+
+	kvCopyKV := make(map[string]string, len(kv.kv))
+	for k, v := range kv.kv {
+		kvCopyKV[k] = v
+	}
+	kvCopySeq := make(map[int64]int, len(kv.lastseq))
+	for cid, seq := range kv.lastseq {
+		kvCopySeq[cid] = seq
+	}
+	lastApplied := kv.lastApplied
+	kv.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(struct {
+		KV      map[string]string
+		LastSeq map[int64]int
+	}{
+		KV:      kvCopyKV,
+		LastSeq: kvCopySeq,
+	}); err != nil {
+		panic(fmt.Sprintf("KVServer maybeTakeSnapshot encode failed: %v", err))
+	}
+	snapshotBytes := w.Bytes()
+
+	kv.rf.Snapshot(lastApplied, snapshotBytes)
+}
 
 func (kv *KVServer) applier() {
 	for msg := range kv.applyCh {
@@ -138,6 +200,7 @@ func (kv *KVServer) applier() {
 		}
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()
+		kv.maybeTakeSnapshot()
 	}
 }
 
