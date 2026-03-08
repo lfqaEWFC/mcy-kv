@@ -27,7 +27,7 @@ func main() {
 	}
 	me := *id
 
-	applyCh := make(chan raftapi.ApplyMsg, 100)
+	applyCh := make(chan raftapi.ApplyMsg, 1000)
 
 	persister := persister.MakePersister()
 

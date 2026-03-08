@@ -92,10 +92,6 @@ func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
 	if snapshot == nil || len(snapshot) == 0 {
 		return
 	}
-
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	var data struct {
 		KV      map[string]string
 		LastSeq map[int64]int
@@ -105,7 +101,6 @@ func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
 	if err := d.Decode(&data); err != nil {
 		panic(fmt.Sprintf("KVServer restoreFromSnapshot decode failed: %v", err))
 	}
-
 	kv.kv = data.KV
 	kv.lastseq = data.LastSeq
 }
@@ -117,11 +112,9 @@ func (kv *KVServer) maybeTakeSnapshot() {
 
 	kv.mu.Lock()
 	if kv.rf.PersistBytes() < kv.maxraftstate {
-		fmt.Printf("no need to snap: current size %d, max size %d\n", kv.rf.PersistBytes(), kv.maxraftstate)
 		kv.mu.Unlock()
 		return
 	}
-	fmt.Printf("need to snap: current size %d, max size %d\n", kv.rf.PersistBytes(), kv.maxraftstate)
 
 	kvCopyKV := make(map[string]string, len(kv.kv))
 	for k, v := range kv.kv {
@@ -171,6 +164,8 @@ func (kv *KVServer) applier() {
 		kv.mu.Lock()
 		if last, ok := kv.lastseq[op.ClientID]; !ok || op.Seq > last {
 			switch op.Type {
+			case "No-op":
+				break
 			case "Put":
 				fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
 				kv.kv[op.Key] = op.Value
