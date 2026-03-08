@@ -64,7 +64,6 @@ func (ck *Clerk) Put(key string, value string) {
 			}
 		} else {
 			fmt.Println("rpc failed")
-			continue
 		}
 		ck.leader = (ck.leader + 1) % len(ck.servers)
 		time.Sleep(50 * time.Millisecond)
