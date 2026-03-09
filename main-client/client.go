@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"mcy-kv/kvclient"
 )
 
@@ -15,5 +16,21 @@ func main() {
 	}
 
 	ck := kvclient.MakeClerk(servers)
-	ck.Put("x", "test")
+	for {
+		fmt.Printf("Enter command (get <key> or put <key> <value>): ")
+		var cmd, key, value string
+		fmt.Scanln(&cmd, &key, &value)
+		switch cmd {
+		case "get":
+			ck.Get(key)
+		case "put":
+			if value == "" {
+				fmt.Println("value is required for put command")
+				continue
+			}
+			ck.Put(key, value)
+		default:
+			fmt.Println("unknown command")
+		}
+	}
 }

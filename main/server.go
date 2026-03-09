@@ -29,7 +29,7 @@ func main() {
 
 	applyCh := make(chan raftapi.ApplyMsg, 1000)
 
-	persister := persister.MakePersister()
+	persister := persister.MakePersister(me)
 
 	t := transport.NewHTTPTransport(
 		me,

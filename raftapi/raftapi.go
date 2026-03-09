@@ -34,4 +34,5 @@ type ApplyMsg struct {
 
 	SnapshotValid bool
 	Snapshot      []byte
+	SnapshotIndex int
 }

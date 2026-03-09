@@ -43,9 +43,21 @@ type PutReply struct {
 	Err Err
 }
 
+type GetArgs struct {
+	Key      string
+	ClientID int64
+	Seq      int
+}
+
+type GetReply struct {
+	Err   Err
+	Value string
+}
+
 type KVServer struct {
 	lastApplied  int
 	maxraftstate int
+	no_opflag    bool
 	mu           sync.Mutex
 	applyCh      chan raftapi.ApplyMsg
 	kv           map[string]string
@@ -64,6 +76,7 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		applyCh:      applyCh,
 		kv:           make(map[string]string),
 		lastseq:      make(map[int64]int),
+		waitCh:       make(map[int]chan OpResult),
 		maxraftstate: maxraftstate,
 	}
 
@@ -73,9 +86,6 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 }
 
 func (kv *KVServer) getWaitCh(index int) chan OpResult {
-	if kv.waitCh == nil {
-		kv.waitCh = make(map[int]chan OpResult)
-	}
 	ch, ok := kv.waitCh[index]
 	if !ok {
 		ch = make(chan OpResult, 1)
@@ -111,6 +121,7 @@ func (kv *KVServer) maybeTakeSnapshot() {
 	}
 
 	kv.mu.Lock()
+	fmt.Printf("PersisterBytes: %d\n", kv.rf.PersistBytes())
 	if kv.rf.PersistBytes() < kv.maxraftstate {
 		kv.mu.Unlock()
 		return
@@ -145,9 +156,11 @@ func (kv *KVServer) maybeTakeSnapshot() {
 
 func (kv *KVServer) applier() {
 	for msg := range kv.applyCh {
+		fmt.Printf("index: %d\n", msg.CommandIndex)
 		if msg.SnapshotValid {
 			kv.mu.Lock()
 			kv.restoreFromSnapshot(msg.Snapshot)
+			kv.lastApplied = msg.SnapshotIndex
 			kv.mu.Unlock()
 			fmt.Printf("snapshot valid...\n")
 			continue
@@ -162,10 +175,12 @@ func (kv *KVServer) applier() {
 			panic("KVServer: unexpected command type\n")
 		}
 		kv.mu.Lock()
-		if last, ok := kv.lastseq[op.ClientID]; !ok || op.Seq > last {
+		if last, _ := kv.lastseq[op.ClientID]; op.Seq > last || op.Type == "No-op" {
+			fmt.Printf("command type: %s\n", op.Type)
 			switch op.Type {
 			case "No-op":
-				break
+				kv.no_opflag = true
+				fmt.Printf("no-op command\n")
 			case "Put":
 				fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
 				kv.kv[op.Key] = op.Value
@@ -177,7 +192,16 @@ func (kv *KVServer) applier() {
 				fmt.Printf("Unknown operation type: %s\n", op.Type)
 				panic("KVServer: unknown operation type\n")
 			}
-			kv.lastseq[op.ClientID] = op.Seq
+			if !kv.no_opflag {
+				kv.lastseq[op.ClientID] = op.Seq
+			}
+		}
+		if kv.no_opflag {
+			kv.no_opflag = false
+			kv.lastApplied = msg.CommandIndex
+			kv.mu.Unlock()
+			kv.maybeTakeSnapshot()
+			continue
 		}
 		res := OpResult{
 			Err:      OK,
@@ -238,6 +262,53 @@ func (kv *KVServer) Put(args PutArgs, reply *PutReply) error {
 			return nil
 		}
 		reply.Err = res.Err
+	case <-time.After(500 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
+
+	return nil
+}
+
+func (kv *KVServer) Get(args GetArgs, reply *GetReply) error {
+	kv.mu.Lock()
+	if kv.lastseq[args.ClientID] >= args.Seq {
+		reply.Err = OK
+		reply.Value = kv.kv[args.Key]
+		kv.mu.Unlock()
+		return nil
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		Type:     "Get",
+		Key:      args.Key,
+		ClientID: args.ClientID,
+		Seq:      args.Seq,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return nil
+	}
+	kv.mu.Lock()
+	ch := kv.getWaitCh(index)
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		kv.removeWaitCh(index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case res := <-ch:
+		if res.ClientID != op.ClientID || res.Seq != op.Seq {
+			reply.Err = ErrWrongLeader
+			return nil
+		}
+		reply.Err = res.Err
+		reply.Value = res.Value
 	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}

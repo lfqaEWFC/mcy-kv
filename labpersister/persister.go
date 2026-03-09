@@ -1,28 +1,25 @@
 package persister
 
-//
-// support for Raft and kvraft to save persistent
-// Raft state (log &c) and k/v server snapshots.
-//
-
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"sync"
 )
 
-const persistFile = "persist_state.bin"
-
 type Persister struct {
 	mu        sync.Mutex
+	file      string
 	raftstate []byte
 	snapshot  []byte
 }
 
-func MakePersister() *Persister {
-	ps := &Persister{}
-	data, err := os.ReadFile(persistFile)
+func MakePersister(id int) *Persister {
+	ps := &Persister{
+		file: fmt.Sprintf("persist_%d.bin", id),
+	}
+	data, err := os.ReadFile(ps.file)
 	if err == nil && len(data) > 0 {
 		buf := bytes.NewBuffer(data)
 		var raftLen int64
@@ -39,18 +36,25 @@ func MakePersister() *Persister {
 	return ps
 }
 
-func clone(orig []byte) []byte {
-	x := make([]byte, len(orig))
-	copy(x, orig)
+func clone(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	x := make([]byte, len(b))
+	copy(x, b)
 	return x
 }
 
 func (ps *Persister) Copy() *Persister {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	np := MakePersister()
-	np.raftstate = ps.raftstate
-	np.snapshot = ps.snapshot
+
+	np := &Persister{
+		file:      ps.file,
+		raftstate: clone(ps.raftstate),
+		snapshot:  clone(ps.snapshot),
+	}
+
 	return np
 }
 
@@ -60,14 +64,24 @@ func (ps *Persister) ReadRaftState() []byte {
 	return clone(ps.raftstate)
 }
 
+func (ps *Persister) ReadSnapshot() []byte {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return clone(ps.snapshot)
+}
+
 func (ps *Persister) RaftStateSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return len(ps.raftstate)
 }
 
-// Save both Raft state and K/V snapshot as a single atomic action,
-// to help avoid them getting out of sync.
+func (ps *Persister) SnapshotSize() int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return len(ps.snapshot)
+}
+
 func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -78,17 +92,9 @@ func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
 	buf.Write(ps.raftstate)
 	binary.Write(buf, binary.LittleEndian, int64(len(ps.snapshot)))
 	buf.Write(ps.snapshot)
-	os.WriteFile(persistFile, buf.Bytes(), 0644)
-}
 
-func (ps *Persister) ReadSnapshot() []byte {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	return clone(ps.snapshot)
-}
+	tmpFile := ps.file + ".tmp"
+	os.WriteFile(tmpFile, buf.Bytes(), 0644)
 
-func (ps *Persister) SnapshotSize() int {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	return len(ps.snapshot)
+	os.Rename(tmpFile, ps.file)
 }

@@ -462,6 +462,7 @@ func (rf *Raft) becomeLeader() {
 	rf.nextIndex[rf.me] = lastIdx + 1
 	rf.matchIndex[rf.me] = lastIdx
 	fmt.Printf("leader is me ...%d\n", rf.me)
+	fmt.Printf("term is %d\n", rf.currentTerm)
 	logindex := len(rf.log)
 	index := rf.raftIdx(logindex)
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm,
@@ -475,7 +476,6 @@ func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.state = Candidate
 	rf.currentTerm += 1
-	fmt.Printf("Server %d starts election for term %d\n", rf.me, rf.currentTerm)
 	term := rf.currentTerm
 	LastLogIndex := rf.getLastIndex()
 	LastLogTerm := rf.termAt(LastLogIndex)
@@ -701,7 +701,6 @@ func (rf *Raft) applier() {
 			CommandIndex: index,
 		}
 		rf.applyCh <- applyMsg
-		fmt.Printf("RaftServer %d applies command at index %d\n", rf.me, index)
 	}
 }
 
@@ -739,10 +738,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.persistWithSnapshot(args.Data)
 	data := args.Data
+	lastIncludeIndex := rf.lastIncludedIndex
 	rf.mu.Unlock()
 	rf.applyCh <- raftapi.ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      data,
+		SnapshotIndex: lastIncludeIndex,
 	}
 	return nil
 }
@@ -800,7 +801,7 @@ func Make(peers map[int]string, me int, t transport.Transport,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	fmt.Printf("Server %d starts with term %d,readsnapshot start\n", rf.me, rf.currentTerm)
+	fmt.Printf("Server %d starts with term %d\n", rf.me, rf.currentTerm)
 	snapshot := rf.persister.ReadSnapshot()
 	fmt.Printf("Server %d reads snapshot of size %d\n", rf.me, len(snapshot))
 	if snapshot != nil && len(snapshot) > 0 {
@@ -808,6 +809,7 @@ func Make(peers map[int]string, me int, t transport.Transport,
 		rf.applyCh <- raftapi.ApplyMsg{
 			SnapshotValid: true,
 			Snapshot:      snapshot,
+			SnapshotIndex: rf.lastIncludedIndex,
 		}
 	}
 

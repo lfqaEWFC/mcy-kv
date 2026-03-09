@@ -69,3 +69,38 @@ func (ck *Clerk) Put(key string, value string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+func (ck *Clerk) Get(key string) string {
+	ck.seq++
+	args := kv.GetArgs{
+		Key:      key,
+		ClientID: ck.clientID,
+		Seq:      ck.seq,
+	}
+	for {
+		server := ck.servers[ck.leader]
+		var reply kv.GetReply
+		ok := call(server, "KVServer.Get", &args, &reply)
+		if ok {
+			switch reply.Err {
+			case kv.OK:
+				if reply.Value == "" {
+					fmt.Printf("success: %s is not found\n", key)
+					return reply.Value
+				}
+				fmt.Printf("success: %s = %s\n", key, reply.Value)
+				return reply.Value
+			case kv.ErrWrongLeader:
+				fmt.Println("wrong leader")
+			case kv.ErrTimeout:
+				fmt.Println("timeout")
+				time.Sleep(10 * time.Second)
+				continue
+			}
+		} else {
+			fmt.Println("rpc failed")
+		}
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
