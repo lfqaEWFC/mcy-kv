@@ -217,7 +217,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if index <= rf.lastIncludedIndex {
 		return
 	}
-	if index > rf.commitIndex {
+	if index > rf.lastApplied {
 		return
 	}
 

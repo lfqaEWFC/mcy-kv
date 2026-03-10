@@ -60,6 +60,7 @@ func (ck *Clerk) Put(key string, value string) {
 				fmt.Println("wrong leader")
 			case kv.ErrTimeout:
 				fmt.Println("timeout")
+				time.Sleep(10 * time.Second)
 				continue
 			}
 		} else {

@@ -64,6 +64,7 @@ type KVServer struct {
 	rf           raftapi.Raft
 	waitCh       map[int]chan OpResult
 	lastseq      map[int64]int
+	lastcmd      map[int64]OpResult
 }
 
 func init() {
@@ -77,6 +78,7 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		kv:           make(map[string]string),
 		lastseq:      make(map[int64]int),
 		waitCh:       make(map[int]chan OpResult),
+		lastcmd:      make(map[int64]OpResult),
 		maxraftstate: maxraftstate,
 	}
 
@@ -105,6 +107,7 @@ func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
 	var data struct {
 		KV      map[string]string
 		LastSeq map[int64]int
+		LastCmd map[int64]OpResult
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
@@ -113,6 +116,7 @@ func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
 	}
 	kv.kv = data.KV
 	kv.lastseq = data.LastSeq
+	kv.lastcmd = data.LastCmd
 }
 
 func (kv *KVServer) maybeTakeSnapshot() {
@@ -126,7 +130,6 @@ func (kv *KVServer) maybeTakeSnapshot() {
 		kv.mu.Unlock()
 		return
 	}
-
 	kvCopyKV := make(map[string]string, len(kv.kv))
 	for k, v := range kv.kv {
 		kvCopyKV[k] = v
@@ -134,6 +137,10 @@ func (kv *KVServer) maybeTakeSnapshot() {
 	kvCopySeq := make(map[int64]int, len(kv.lastseq))
 	for cid, seq := range kv.lastseq {
 		kvCopySeq[cid] = seq
+	}
+	kvCopyCmd := make(map[int64]OpResult, len(kv.lastcmd))
+	for cid, cmd := range kv.lastcmd {
+		kvCopyCmd[cid] = cmd
 	}
 	lastApplied := kv.lastApplied
 	kv.mu.Unlock()
@@ -143,15 +150,24 @@ func (kv *KVServer) maybeTakeSnapshot() {
 	if err := e.Encode(struct {
 		KV      map[string]string
 		LastSeq map[int64]int
+		LastCmd map[int64]OpResult
 	}{
 		KV:      kvCopyKV,
 		LastSeq: kvCopySeq,
+		LastCmd: kvCopyCmd,
 	}); err != nil {
 		panic(fmt.Sprintf("KVServer maybeTakeSnapshot encode failed: %v", err))
 	}
 	snapshotBytes := w.Bytes()
 
 	kv.rf.Snapshot(lastApplied, snapshotBytes)
+	kv.mu.Lock()
+	for idx := range kv.waitCh {
+		if idx <= lastApplied {
+			delete(kv.waitCh, idx)
+		}
+	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) applier() {
@@ -184,8 +200,6 @@ func (kv *KVServer) applier() {
 			case "Put":
 				fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
 				kv.kv[op.Key] = op.Value
-			case "Append":
-				kv.kv[op.Key] += op.Value
 			case "Get":
 				fmt.Printf("Get operation applied for key: %s\n", op.Key)
 			default:
@@ -210,6 +224,7 @@ func (kv *KVServer) applier() {
 		}
 		if op.Type == "Get" {
 			res.Value = kv.kv[op.Key]
+			kv.lastcmd[op.ClientID] = res
 		}
 		if ch, ok := kv.waitCh[msg.CommandIndex]; ok {
 			select {
@@ -273,7 +288,7 @@ func (kv *KVServer) Get(args GetArgs, reply *GetReply) error {
 	kv.mu.Lock()
 	if kv.lastseq[args.ClientID] >= args.Seq {
 		reply.Err = OK
-		reply.Value = kv.kv[args.Key]
+		reply.Value = kv.lastcmd[args.ClientID].Value
 		kv.mu.Unlock()
 		return nil
 	}
