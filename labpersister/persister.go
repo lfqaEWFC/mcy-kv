@@ -15,9 +15,9 @@ type Persister struct {
 	snapshot  []byte
 }
 
-func MakePersister(id int) *Persister {
+func MakePersister(name string, id int) *Persister {
 	ps := &Persister{
-		file: fmt.Sprintf("persist_%d.bin", id),
+		file: fmt.Sprintf("persist_%s_%d.bin", name, id),
 	}
 	data, err := os.ReadFile(ps.file)
 	if err == nil && len(data) > 0 {

@@ -57,7 +57,6 @@ type GetReply struct {
 type KVServer struct {
 	lastApplied  int
 	maxraftstate int
-	no_opflag    bool
 	mu           sync.Mutex
 	applyCh      chan raftapi.ApplyMsg
 	kv           map[string]string
@@ -186,51 +185,44 @@ func (kv *KVServer) applier() {
 			continue
 		}
 		fmt.Printf("command valid...\n")
-		op, ok := msg.Command.(Op)
-		if !ok {
-			panic("KVServer: unexpected command type\n")
-		}
 		kv.mu.Lock()
-		if last, _ := kv.lastseq[op.ClientID]; op.Seq > last || op.Type == "No-op" {
-			fmt.Printf("command type: %s\n", op.Type)
-			switch op.Type {
-			case "No-op":
-				kv.no_opflag = true
-				fmt.Printf("no-op command\n")
-			case "Put":
-				fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
-				kv.kv[op.Key] = op.Value
-			case "Get":
-				fmt.Printf("Get operation applied for key: %s\n", op.Key)
-			default:
-				fmt.Printf("Unknown operation type: %s\n", op.Type)
-				panic("KVServer: unknown operation type\n")
-			}
-			if !kv.no_opflag {
+		switch op := msg.Command.(type) {
+		case Op:
+			last := kv.lastseq[op.ClientID]
+			if op.Seq > last {
+				fmt.Printf("command type: %s\n", op.Type)
+				switch op.Type {
+				case "Put":
+					fmt.Printf("Put command: key=%s, value=%s\n", op.Key, op.Value)
+					kv.kv[op.Key] = op.Value
+				case "Get":
+					fmt.Printf("Get operation applied for key: %s\n", op.Key)
+				default:
+					fmt.Printf("Unknown operation type: %s\n", op.Type)
+					panic("KVServer: unknown operation type\n")
+				}
 				kv.lastseq[op.ClientID] = op.Seq
 			}
-		}
-		if kv.no_opflag {
-			kv.no_opflag = false
-			kv.lastApplied = msg.CommandIndex
-			kv.mu.Unlock()
-			kv.maybeTakeSnapshot()
-			continue
-		}
-		res := OpResult{
-			Err:      OK,
-			ClientID: op.ClientID,
-			Seq:      op.Seq,
-		}
-		if op.Type == "Get" {
-			res.Value = kv.kv[op.Key]
-			kv.lastcmd[op.ClientID] = res
-		}
-		if ch, ok := kv.waitCh[msg.CommandIndex]; ok {
-			select {
-			case ch <- res:
-			default:
+			res := OpResult{
+				Err:      OK,
+				ClientID: op.ClientID,
+				Seq:      op.Seq,
 			}
+			if op.Type == "Get" {
+				res.Value = kv.kv[op.Key]
+				kv.lastcmd[op.ClientID] = res
+			}
+			if ch, ok := kv.waitCh[msg.CommandIndex]; ok {
+				select {
+				case ch <- res:
+				default:
+				}
+			}
+		case raftapi.NoOp:
+			fmt.Printf("No-op command applied\n")
+		default:
+			fmt.Printf("Unknown command type: %T\n", msg.Command)
+			panic("KVServer: unknown command type\n")
 		}
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()

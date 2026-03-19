@@ -36,3 +36,8 @@ type ApplyMsg struct {
 	Snapshot      []byte
 	SnapshotIndex int
 }
+
+// NoOp is a no-operation command used for heartbeats and other purposes.
+type NoOp struct {
+	Type string
+}

@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mcy-kv/kv"
 	"mcy-kv/labgob"
 	"mcy-kv/raftapi"
 	"mcy-kv/transport"
@@ -466,7 +465,7 @@ func (rf *Raft) becomeLeader() {
 	logindex := len(rf.log)
 	index := rf.raftIdx(logindex)
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm,
-		Command: kv.Op{Type: "No-op"}})
+		Command: raftapi.NoOp{Type: "No-op"}})
 	rf.persist()
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
@@ -779,6 +778,7 @@ func (rf *Raft) ticker() {
 // for any long-running work.
 func Make(peers map[int]string, me int, t transport.Transport,
 	persister *persister.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
+	labgob.Register(raftapi.NoOp{})
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
