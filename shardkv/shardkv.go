@@ -304,6 +304,8 @@ func (shardkv *ShardServer) applier() {
 }
 
 func (shardkv *ShardServer) configPoller() {
+	//给kv从raft收敛状态预留时间
+	time.Sleep(10 * time.Second)
 	for {
 		_, isLeader := shardkv.rf.GetState()
 		if !isLeader {
@@ -317,6 +319,8 @@ func (shardkv *ShardServer) configPoller() {
 		shardkv.mu.Unlock()
 
 		if !hasPending {
+			//在更新config的时候打印config信息
+			fmt.Println(shardkv.config)
 			newConfig := shardkv.ck.Query(currentNum + 1)
 			if newConfig.Num == currentNum+1 {
 				shardkv.rf.Start(Op{Type: "ConfigUpdate", Config: newConfig})
