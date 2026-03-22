@@ -12,6 +12,12 @@ import (
 	"mcy-kv/transport"
 )
 
+var groupConfig = map[int]map[int]string{
+	1: {0: "127.0.0.1:8001", 1: "127.0.0.1:8004", 2: "127.0.0.1:8007", 3: "127.0.0.1:8010", 4: "127.0.0.1:8013"},
+	2: {0: "127.0.0.1:8002", 1: "127.0.0.1:8005", 2: "127.0.0.1:8008", 3: "127.0.0.1:8011", 4: "127.0.0.1:8014"},
+	3: {0: "127.0.0.1:8003", 1: "127.0.0.1:8006", 2: "127.0.0.1:8009", 3: "127.0.0.1:8012", 4: "127.0.0.1:8015"},
+}
+
 func main() {
 	ctrlerpeers := map[int]string{
 		0: "127.0.0.1:8016",
@@ -20,21 +26,13 @@ func main() {
 		3: "127.0.0.1:8019",
 		4: "127.0.0.1:8020",
 	}
-	clientID := rand.Int63()
-	fmt.Printf("newclient start\n")
-	ck := ctrlerclient.NewClient(ctrlerpeers, clientID)
-	fmt.Printf("newclient end\n")
-	fmt.Printf("query start\n")
-	config := ck.Query(-1)
-	fmt.Printf("query end\n")
-	shardpeers := config.Groups
 	id := flag.Int("id", -1, "server id")
 	flag.Parse()
 	if *id < 0 {
 		panic("must specify --id")
 	}
 	me := *id
-	for gid, peers := range shardpeers {
+	for gid, peers := range groupConfig {
 		applyCh := make(chan raftapi.ApplyMsg, 1000)
 		file := fmt.Sprintf("shardserver_gid_%d_id", gid)
 		ps := persister.MakePersister(file, me)
