@@ -192,6 +192,9 @@ func (shardkv *ShardServer) applyConfig(newConfig shardctrler.Config) {
 			}
 		} else {
 			if oldGid == 0 {
+				delete(shardkv.shardkv, shard)
+				delete(shardkv.lastshardseq, shard)
+				delete(shardkv.lastshardcmd, shard)
 				shardkv.shardState[shard] = Inactived
 			}
 			if oldGid == shardkv.gid {
@@ -337,7 +340,6 @@ func (shardkv *ShardServer) applier() {
 				} else {
 					fmt.Printf("gid %d,received old/duplicate config %d\n", shardkv.gid, op.Config.Num)
 				}
-
 			} else if op.Type == "InsertShard" {
 				if op.ConfigNum != shardkv.pendingConfig.Num {
 					break
