@@ -62,20 +62,17 @@ func (ck *Clerk) Put(key string, value string) {
 	for {
 		shard := key_shard(key)
 		gid := ck.config.Shards[shard]
-		fmt.Println("config:", ck.config)
 		servers, ok := ck.config.Groups[gid]
-		fmt.Println("servers:", servers)
 		if !ok || len(servers) == 0 {
 			ck.config = ck.ctrlck.Query(-1)
+			fmt.Println(ck.config)
 			ck.leader = 0
 			continue
 		}
 		for i := 0; i < len(servers); i++ {
 			server := servers[ck.leader%len(servers)]
 			var reply shardkv.PutReply
-			fmt.Printf("call start\n")
 			ok := call(server, "ShardServer.Put", &args, &reply)
-			fmt.Printf("call end\n")
 			if ok {
 				fmt.Printf("Err is %s\n", reply.Err)
 				switch reply.Err {
@@ -87,11 +84,13 @@ func (ck *Clerk) Put(key string, value string) {
 
 				case shardkv.ErrWrongGroup:
 					ck.config = ck.ctrlck.Query(-1)
+					fmt.Println(ck.config)
 					ck.leader = 0
 					goto RETRY
 
 				case shardkv.ErrTimeout:
 					time.Sleep(100 * time.Millisecond)
+					goto RETRY
 				}
 			} else {
 				fmt.Printf("rpc fail\n")
@@ -116,15 +115,14 @@ func (ck *Clerk) Get(key string) string {
 		servers, ok := ck.config.Groups[gid]
 		if !ok || len(servers) == 0 {
 			ck.config = ck.ctrlck.Query(-1)
+			fmt.Println(ck.config)
 			ck.leader = 0
 			continue
 		}
 		for i := 0; i < len(servers); i++ {
 			server := servers[ck.leader%len(servers)]
 			var reply shardkv.GetReply
-			fmt.Printf("call start\n")
 			ok := call(server, "ShardServer.Get", &args, &reply)
-			fmt.Printf("call end\n")
 			if ok {
 				switch reply.Err {
 				case shardkv.OK:
@@ -135,12 +133,16 @@ func (ck *Clerk) Get(key string) string {
 
 				case shardkv.ErrWrongGroup:
 					ck.config = ck.ctrlck.Query(-1)
+					fmt.Println(ck.config)
 					ck.leader = 0
 					goto RETRY
 
 				case shardkv.ErrTimeout:
 					time.Sleep(100 * time.Millisecond)
+					goto RETRY
 				}
+			} else {
+				fmt.Printf("rpc fail\n")
 			}
 			ck.leader = (ck.leader + 1) % len(servers)
 		}

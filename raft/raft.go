@@ -9,7 +9,6 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -224,7 +223,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	cut := rf.logIdx(index)
 	rf.lastIncludedTerm = rf.termAt(index)
 	rf.lastIncludedIndex = index
-	fmt.Printf("Snapshot : lastindex is %d\n", rf.lastIncludedIndex)
 
 	//丢弃 log
 	newlog := []LogEntry{{Term: rf.lastIncludedTerm, Command: nil}}
@@ -460,8 +458,6 @@ func (rf *Raft) becomeLeader() {
 	}
 	rf.nextIndex[rf.me] = lastIdx + 1
 	rf.matchIndex[rf.me] = lastIdx
-	fmt.Printf("leader is me ...%d\n", rf.me)
-	fmt.Printf("term is %d\n", rf.currentTerm)
 	logindex := len(rf.log)
 	index := rf.raftIdx(logindex)
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm,
@@ -793,7 +789,6 @@ func Make(peers map[int]string, me int, t transport.Transport,
 	rf.elecTimeout = rf.randElectionTimeout()
 	rf.log = []LogEntry{{Term: 0, Command: nil}}
 	rf.commitIndex = 0
-	fmt.Printf("makecommitidx: %d\n", rf.commitIndex)
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
 	rf.lastIncludedIndex = 0
@@ -801,11 +796,8 @@ func Make(peers map[int]string, me int, t transport.Transport,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	fmt.Printf("Server %d starts with term %d\n", rf.me, rf.currentTerm)
 	snapshot := rf.persister.ReadSnapshot()
-	fmt.Printf("Server %d reads snapshot of size %d\n", rf.me, len(snapshot))
 	if snapshot != nil && len(snapshot) > 0 {
-		fmt.Printf("Send snapshot vaild...\n")
 		rf.applyCh <- raftapi.ApplyMsg{
 			SnapshotValid: true,
 			Snapshot:      snapshot,
@@ -818,6 +810,5 @@ func Make(peers map[int]string, me int, t transport.Transport,
 
 	// start applier goroutine to apply committed log entries
 	go rf.applier()
-	fmt.Printf("raft make end\n")
 	return rf
 }

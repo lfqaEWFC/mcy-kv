@@ -191,6 +191,9 @@ func (shardkv *ShardServer) applyConfig(newConfig shardctrler.Config) {
 				shardkv.shardState[shard] = Pulling
 			}
 		} else {
+			if oldGid == 0 {
+				shardkv.shardState[shard] = Inactived
+			}
 			if oldGid == shardkv.gid {
 				shardkv.shardState[shard] = BePulling
 			}
@@ -237,7 +240,6 @@ func (shardkv *ShardServer) maybeTakeSnapshot() {
 		return
 	}
 	shardkv.mu.Lock()
-	fmt.Printf("PersisterBytes: %d\n", shardkv.rf.PersistBytes())
 	if shardkv.rf.PersistBytes() < shardkv.maxraftstate {
 		shardkv.mu.Unlock()
 		return
@@ -307,7 +309,6 @@ func (shardkv *ShardServer) maybeTakeSnapshot() {
 
 func (shardkv *ShardServer) applier() {
 	for msg := range shardkv.applyCh {
-		fmt.Printf("index: %d\n", msg.CommandIndex)
 		if msg.SnapshotValid {
 			shardkv.mu.Lock()
 			shardkv.restoreFromSnapshot(msg.Snapshot)
@@ -320,7 +321,6 @@ func (shardkv *ShardServer) applier() {
 			fmt.Printf("error command type...\n")
 			continue
 		}
-		fmt.Printf("command valid...\n")
 		shardkv.mu.Lock()
 		switch op := msg.Command.(type) {
 		case Op:
@@ -328,12 +328,14 @@ func (shardkv *ShardServer) applier() {
 				if op.Config.Num > shardkv.config.Num {
 					shardkv.pendingConfig = ctrlerclient.CopyConfig(op.Config)
 					shardkv.applyConfig(op.Config)
-					if shardkv.allServing() {
-						shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
-					}
 					fmt.Printf("pending config %d\n", op.Config.Num)
+					if shardkv.allServing() {
+						fmt.Printf("gid : %d\n", shardkv.gid)
+						shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
+						fmt.Println(shardkv.config)
+					}
 				} else {
-					fmt.Printf("received old/duplicate config %d\n", op.Config.Num)
+					fmt.Printf("gid %d,received old/duplicate config %d\n", shardkv.gid, op.Config.Num)
 				}
 
 			} else if op.Type == "InsertShard" {
@@ -341,57 +343,67 @@ func (shardkv *ShardServer) applier() {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] != Pulling {
-					break
-				}
-				newKV := make(map[string]string)
-				for k, v := range op.Data {
-					newKV[k] = v
-				}
-				shardkv.shardkv[shard] = newKV
-				newSeq := make(map[int64]int)
-				for cid, seq := range op.ClientSeq {
-					newSeq[cid] = int(seq)
-				}
-				shardkv.lastshardseq[shard] = newSeq
-				newCmd := make(map[int64]OpResult)
-				for cid, cmd := range op.ClientCmd {
-					newCmd[cid] = cmd
-				}
-				shardkv.lastshardcmd[shard] = newCmd
-				shardkv.shardState[shard] = GC
+				if shardkv.shardState[shard] == Pulling {
+					newKV := make(map[string]string)
+					for k, v := range op.Data {
+						newKV[k] = v
+					}
+					shardkv.shardkv[shard] = newKV
+					newSeq := make(map[int64]int)
+					for cid, seq := range op.ClientSeq {
+						newSeq[cid] = int(seq)
+					}
+					shardkv.lastshardseq[shard] = newSeq
+					newCmd := make(map[int64]OpResult)
+					for cid, cmd := range op.ClientCmd {
+						newCmd[cid] = cmd
+					}
+					shardkv.lastshardcmd[shard] = newCmd
+					shardkv.shardState[shard] = GC
 
+					fmt.Printf("gid %d shard %d: insert end\n", shardkv.gid, shard)
+					fmt.Printf("gid %d:	", shardkv.gid)
+					fmt.Println(shardkv.shardState)
+				}
 			} else if op.Type == "GCComplete" {
 				if op.ConfigNum != shardkv.pendingConfig.Num {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] != GC {
-					break
-				}
-				shardkv.shardState[shard] = Serving
-				if shardkv.allServing() {
-					shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
+				if shardkv.shardState[shard] == GC {
+					shardkv.shardState[shard] = Serving
+					fmt.Printf("gid %d shard %d: gc end\n", shardkv.gid, shard)
+					fmt.Printf("gid %d:	", shardkv.gid)
+					fmt.Println(shardkv.shardState)
+					if shardkv.allServing() {
+						shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
+						fmt.Printf("gid : %d\n", shardkv.gid)
+						fmt.Println(shardkv.config)
+					}
 				}
 			} else if op.Type == "DeleteShard" {
 				if op.ConfigNum != shardkv.pendingConfig.Num {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] != BePulling {
-					break
-				}
-				delete(shardkv.shardkv, shard)
-				delete(shardkv.lastshardseq, shard)
-				delete(shardkv.lastshardcmd, shard)
-				shardkv.shardState[shard] = Inactived
-				if shardkv.allServing() {
-					shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
-				}
-				if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
-					select {
-					case ch <- OpResult{}:
-					default:
+				if shardkv.shardState[shard] == BePulling {
+					delete(shardkv.shardkv, shard)
+					delete(shardkv.lastshardseq, shard)
+					delete(shardkv.lastshardcmd, shard)
+					shardkv.shardState[shard] = Inactived
+					fmt.Printf("gid %d shard %d: inactive end\n", shardkv.gid, shard)
+					fmt.Printf("gid %d:	", shardkv.gid)
+					fmt.Println(shardkv.shardState)
+					if shardkv.allServing() {
+						shardkv.config = ctrlerclient.CopyConfig(shardkv.pendingConfig)
+						fmt.Printf("gid : %d\n", shardkv.gid)
+						fmt.Println(shardkv.config)
+					}
+					if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
+						select {
+						case ch <- OpResult{}:
+						default:
+						}
 					}
 				}
 			} else {
@@ -445,7 +457,6 @@ func (shardkv *ShardServer) applier() {
 				}
 			}
 		case raftapi.NoOp:
-			fmt.Printf("No-op command applied\n")
 		default:
 			fmt.Printf("Unknown command type: %T\n", msg.Command)
 			panic("KVServer: unknown command type\n")
@@ -472,7 +483,6 @@ func (shardkv *ShardServer) configPoller() {
 		shardkv.mu.Unlock()
 
 		if allServing && pendingNum <= currentNum {
-			fmt.Println(shardkv.config)
 			newConfig := shardkv.ck.Query(currentNum + 1)
 			if newConfig.Num == currentNum+1 {
 				shardkv.rf.Start(Op{Type: "ConfigUpdate", Config: newConfig})
@@ -511,12 +521,16 @@ func (shardkv *ShardServer) Puller() {
 			if !ok {
 				continue
 			}
+			serversCopy := make([]string, len(servers))
+			for cid, srv := range servers {
+				serversCopy[cid] = srv
+			}
 			shardkv.mu.Unlock()
 			var shardData map[string]string
 			var clientSeq map[int64]int64
 			var clientCmd map[int64]OpResult
 			success := false
-			for _, srv := range servers {
+			for _, srv := range serversCopy {
 				args := PullShardArgs{
 					Shard:     shard,
 					ConfigNum: pendingNum,
@@ -579,9 +593,13 @@ func (shardkv *ShardServer) gcWorker() {
 			if !ok {
 				continue
 			}
+			serversCopy := make([]string, len(servers))
+			for cid, srv := range servers {
+				serversCopy[cid] = srv
+			}
 			shardkv.mu.Unlock()
 			success := false
-			for _, srv := range servers {
+			for _, srv := range serversCopy {
 				args := DeleteShardArgs{
 					Shard:     shard,
 					ConfigNum: pendingNum,
@@ -590,6 +608,8 @@ func (shardkv *ShardServer) gcWorker() {
 
 				if call(srv, "ShardServer.DeleteShard", args, &reply) && reply.Err == OK {
 					success = true
+					fmt.Printf("gid %d shard %d: ", shardkv.gid, shard)
+					fmt.Printf("call delete success,next is gc\n")
 					break
 				}
 			}
