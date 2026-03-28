@@ -324,7 +324,9 @@ func (shardkv *ShardServer) applier() {
 			fmt.Printf("error command type...\n")
 			continue
 		}
+		fmt.Printf("GID %d: APPILER PREPARES TO GET LOCK\n", shardkv.gid)
 		shardkv.mu.Lock()
+		fmt.Printf("GID %d: APPILER GET LOCK\n", shardkv.gid)
 		switch op := msg.Command.(type) {
 		case Op:
 			if op.Type == "ConfigUpdate" {
@@ -338,7 +340,8 @@ func (shardkv *ShardServer) applier() {
 						fmt.Println(shardkv.config)
 					}
 				} else {
-					fmt.Printf("gid %d,received old/duplicate config %d\n", shardkv.gid, op.Config.Num)
+					fmt.Printf("gid %d ", shardkv.gid)
+					fmt.Printf("received old/duplicate config %d\n", op.Config.Num)
 				}
 			} else if op.Type == "InsertShard" {
 				if op.ConfigNum != shardkv.pendingConfig.Num {
@@ -484,7 +487,7 @@ func (shardkv *ShardServer) configPoller() {
 		pendingNum := shardkv.pendingConfig.Num
 		shardkv.mu.Unlock()
 
-		if allServing && pendingNum <= currentNum {
+		if allServing && pendingNum == currentNum {
 			newConfig := shardkv.ck.Query(currentNum + 1)
 			if newConfig.Num == currentNum+1 {
 				shardkv.rf.Start(Op{Type: "ConfigUpdate", Config: newConfig})
@@ -516,7 +519,9 @@ func (shardkv *ShardServer) Puller() {
 					ClientSeq: make(map[int64]int64),
 					ConfigNum: pendingNum,
 				}
+				shardkv.mu.Unlock()
 				shardkv.rf.Start(op)
+				shardkv.mu.Lock()
 				continue
 			}
 			servers, ok := shardkv.config.Groups[oldGID]
@@ -588,7 +593,9 @@ func (shardkv *ShardServer) gcWorker() {
 					Shard:     shard,
 					ConfigNum: pendingNum,
 				}
+				shardkv.mu.Unlock()
 				shardkv.rf.Start(op)
+				shardkv.mu.Lock()
 				continue
 			}
 			servers, ok := shardkv.config.Groups[oldGID]
@@ -667,12 +674,13 @@ func (shardkv *ShardServer) Put(args PutArgs, reply *PutReply) error {
 		Seq:      args.Seq,
 	}
 
-	shardkv.mu.Lock()
 	index, _, isLeader := shardkv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return nil
 	}
+
+	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
 	shardkv.mu.Unlock()
 
@@ -733,12 +741,13 @@ func (shardkv *ShardServer) Get(args GetArgs, reply *GetReply) error {
 		Seq:      args.Seq,
 	}
 
-	shardkv.mu.Lock()
 	index, _, isLeader := shardkv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return nil
 	}
+
+	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
 	shardkv.mu.Unlock()
 
@@ -826,12 +835,14 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 		Shard:     shard,
 		ConfigNum: args.ConfigNum,
 	}
+	shardkv.mu.Unlock()
+
 	index, _, isLeader := shardkv.rf.Start(op)
 	if !isLeader {
-		shardkv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return nil
 	}
+	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
 	shardkv.mu.Unlock()
 	defer func() {
