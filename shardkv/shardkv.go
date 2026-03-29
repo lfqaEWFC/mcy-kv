@@ -188,17 +188,23 @@ func (shardkv *ShardServer) applyConfig(newConfig shardctrler.Config) {
 		newGid := newConfig.Shards[shard]
 		if newGid == shardkv.gid {
 			if oldGid != shardkv.gid {
-				shardkv.shardState[shard] = Pulling
+				if shardkv.shardState[shard] == Inactived {
+					shardkv.shardState[shard] = Pulling
+				}
 			}
 		} else {
 			if oldGid == 0 {
 				delete(shardkv.shardkv, shard)
 				delete(shardkv.lastshardseq, shard)
 				delete(shardkv.lastshardcmd, shard)
-				shardkv.shardState[shard] = Inactived
+				if shardkv.shardState[shard] == Serving {
+					shardkv.shardState[shard] = Inactived
+				}
 			}
 			if oldGid == shardkv.gid {
-				shardkv.shardState[shard] = BePulling
+				if shardkv.shardState[shard] == Serving {
+					shardkv.shardState[shard] = BePulling
+				}
 			}
 		}
 	}
@@ -331,6 +337,9 @@ func (shardkv *ShardServer) applier() {
 		case Op:
 			if op.Type == "ConfigUpdate" {
 				if op.Config.Num > shardkv.config.Num {
+					if shardkv.pendingConfig.Num > shardkv.config.Num {
+						break
+					}
 					shardkv.pendingConfig = ctrlerclient.CopyConfig(op.Config)
 					shardkv.applyConfig(op.Config)
 					fmt.Printf("pending config %d\n", op.Config.Num)
