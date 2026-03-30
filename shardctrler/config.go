@@ -17,10 +17,18 @@ var groupConfig = map[int]map[int]string{
 }
 
 const NShards = 10
+
 const (
 	OK             Err = "OK"
 	ErrWrongLeader Err = "ErrWrongLeader"
 	ErrTimeout     Err = "ErrTimeout"
+)
+
+const (
+	OpQuery = "Query"
+	OpJoin  = "Join"
+	OpLeave = "Leave"
+	OpMove  = "Move"
 )
 
 type Err string
@@ -140,6 +148,154 @@ func (sc *ShardCtrler) removeWaitCh(index int) {
 	delete(sc.waitCh, index)
 }
 
+func (sc *ShardCtrler) submit(op Op) (OpResult, Err) {
+	sc.mu.Lock()
+	index, _, isLeader := sc.rf.Start(op)
+	if !isLeader {
+		sc.mu.Unlock()
+		return OpResult{}, ErrWrongLeader
+	}
+	ch := sc.getWaitCh(index)
+	sc.mu.Unlock()
+
+	defer func() {
+		sc.mu.Lock()
+		sc.removeWaitCh(index)
+		sc.mu.Unlock()
+	}()
+
+	select {
+	case res := <-ch:
+		return res, res.Err
+	case <-time.After(500 * time.Millisecond):
+		return OpResult{}, ErrTimeout
+	}
+}
+
+func (sc *ShardCtrler) latestConfigLocked() Config {
+	return copyConfig(sc.configs[len(sc.configs)-1])
+}
+
+func (sc *ShardCtrler) queryConfigLocked(num int) Config {
+	if num == -1 || num >= len(sc.configs) {
+		return copyConfig(sc.configs[len(sc.configs)-1])
+	}
+	return copyConfig(sc.configs[num])
+}
+
+func (sc *ShardCtrler) applyJoinLocked(gid int) Config {
+	cfg := sc.latestConfigLocked()
+	if _, exists := cfg.Groups[gid]; exists {
+		return cfg
+	}
+	if servers, ok := groupConfig[gid]; ok {
+		cfg.Groups[gid] = make(map[int]string, len(servers))
+		for k, v := range servers {
+			cfg.Groups[gid][k] = v
+		}
+	} else {
+		cfg.Groups[gid] = map[int]string{}
+	}
+	cfg.Num++
+	sc.rebalanceLocked(&cfg)
+	sc.configs = append(sc.configs, cfg)
+	return cfg
+}
+
+func (sc *ShardCtrler) applyLeaveLocked(gid int) Config {
+	cfg := sc.latestConfigLocked()
+	if _, exists := cfg.Groups[gid]; !exists {
+		return cfg
+	}
+	delete(cfg.Groups, gid)
+	cfg.Num++
+	if len(cfg.Groups) == 0 {
+		cfg.Shards = [NShards]int{}
+		sc.configs = append(sc.configs, cfg)
+		return cfg
+	}
+	sc.rebalanceLocked(&cfg)
+	sc.configs = append(sc.configs, cfg)
+	return cfg
+}
+
+func (sc *ShardCtrler) applyMoveLocked(shard, gid int) Config {
+	cfg := sc.latestConfigLocked()
+	if shard < 0 || shard >= NShards {
+		return cfg
+	}
+	if gid != 0 {
+		if _, ok := cfg.Groups[gid]; !ok {
+			return cfg
+		}
+	}
+	cfg.Shards[shard] = gid
+	cfg.Num++
+	sc.configs = append(sc.configs, cfg)
+	return cfg
+}
+
+func (sc *ShardCtrler) rebalanceLocked(cfg *Config) {
+	gids := make([]int, 0, len(cfg.Groups))
+	for gid := range cfg.Groups {
+		gids = append(gids, gid)
+	}
+	sort.Ints(gids)
+	if len(gids) == 0 {
+		cfg.Shards = [NShards]int{}
+		return
+	}
+	target := make(map[int]int, len(gids))
+	base := NShards / len(gids)
+	rem := NShards % len(gids)
+	for i, gid := range gids {
+		target[gid] = base
+		if i < rem {
+			target[gid]++
+		}
+	}
+	count := make(map[int]int, len(gids))
+	free := make([]int, 0, NShards)
+	for s, gid := range cfg.Shards {
+		if gid == 0 {
+			free = append(free, s)
+			continue
+		}
+		if _, ok := cfg.Groups[gid]; !ok {
+			cfg.Shards[s] = 0
+			free = append(free, s)
+			continue
+		}
+		count[gid]++
+	}
+	for _, gid := range gids {
+		for count[gid] > target[gid] {
+			shard := -1
+			for s := NShards - 1; s >= 0; s-- {
+				if cfg.Shards[s] == gid {
+					shard = s
+					break
+				}
+			}
+			if shard < 0 {
+				break
+			}
+			cfg.Shards[shard] = 0
+			count[gid]--
+			free = append(free, shard)
+		}
+	}
+	sort.Ints(free)
+	idx := 0
+	for _, gid := range gids {
+		for count[gid] < target[gid] {
+			cfg.Shards[free[idx]] = gid
+			count[gid]++
+			idx++
+		}
+	}
+}
+
 func copyConfig(cfg Config) Config {
 	newGroups := make(map[int]map[int]string)
 	for gid, servers := range cfg.Groups {
@@ -218,101 +374,36 @@ func (sc *ShardCtrler) apply() {
 			continue
 		}
 		sc.mu.Lock()
-		switch op := msg.Command.(type) {
+		switch cmd := msg.Command.(type) {
+		case raftapi.NoOp:
+			sc.lastapplied = msg.CommandIndex
+			index := msg.CommandIndex
+			sc.mu.Unlock()
+			sc.maybeTakeSnapshot(index)
+			continue
 		case Op:
-			last, ok := sc.lastSeq[op.ClientID]
-			var cfg Config
-			if op.Type == "Query" {
-				if op.Num == -1 || op.Num >= len(sc.configs) {
-					cfg = copyConfig(sc.configs[len(sc.configs)-1])
-				} else {
-					cfg = copyConfig(sc.configs[op.Num])
+			op := cmd
+			var res OpResult
+			if op.Type == OpQuery {
+				cfg := sc.queryConfigLocked(op.Num)
+				res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
+			} else {
+				last, exists := sc.lastSeq[op.ClientID]
+				if !exists || op.Seq > last {
+					switch op.Type {
+					case OpJoin:
+						_ = sc.applyJoinLocked(op.GID)
+					case OpLeave:
+						_ = sc.applyLeaveLocked(op.GID)
+					case OpMove:
+						_ = sc.applyMoveLocked(op.Shard, op.GID)
+					default:
+						sc.mu.Unlock()
+						panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
+					}
+					sc.lastSeq[op.ClientID] = op.Seq
 				}
-			}
-			if op.Type != "Query" && (!ok || op.Seq > last) {
-				switch op.Type {
-				case "Join":
-					cfg = copyConfig(sc.configs[len(sc.configs)-1])
-					if _, exists := cfg.Groups[op.GID]; !exists {
-						if servers, ok := groupConfig[op.GID]; ok {
-							cfg.Groups[op.GID] = make(map[int]string)
-							for k, v := range servers {
-								cfg.Groups[op.GID][k] = v
-							}
-						} else {
-							cfg.Groups[op.GID] = map[int]string{}
-						}
-						allGIDs := make([]int, 0, len(cfg.Groups))
-						for gid := range cfg.Groups {
-							allGIDs = append(allGIDs, gid)
-						}
-						sort.Ints(allGIDs)
-						for i := 0; i < NShards; i++ {
-							cfg.Shards[i] = allGIDs[i%len(allGIDs)]
-						}
-						cfg.Num++
-						sc.configs = append(sc.configs, cfg)
-					} else {
-						cfg = copyConfig(sc.configs[len(sc.configs)-1])
-						fmt.Println(sc.configs[len(sc.configs)-1])
-					}
-					fmt.Println(sc.configs[len(sc.configs)-1])
-				case "Leave":
-					cfg = copyConfig(sc.configs[len(sc.configs)-1])
-					if _, exists := cfg.Groups[op.GID]; exists {
-						delete(cfg.Groups, op.GID)
-						remainingGIDs := make([]int, 0, len(cfg.Groups))
-						for gid := range cfg.Groups {
-							remainingGIDs = append(remainingGIDs, gid)
-						}
-						sort.Ints(remainingGIDs)
-						GroupEmptyFlag := false
-						for i := 0; i < NShards; i++ {
-							if cfg.Shards[i] == op.GID {
-								if len(remainingGIDs) > 0 {
-									cfg.Shards[i] =
-										remainingGIDs[i%len(remainingGIDs)]
-								} else {
-									GroupEmptyFlag = true
-									break
-								}
-							}
-						}
-						if !GroupEmptyFlag {
-							cfg.Num++
-							sc.configs = append(sc.configs, cfg)
-						}
-						fmt.Println(sc.configs[len(sc.configs)-1])
-					} else {
-						cfg = copyConfig(sc.configs[len(sc.configs)-1])
-						fmt.Println(sc.configs[len(sc.configs)-1])
-					}
-				case "Move":
-					if op.Shard < 0 || op.Shard >= NShards {
-						panic(fmt.Sprintf("invalid shard number %d", op.Shard))
-					}
-					cfg = copyConfig(sc.configs[len(sc.configs)-1])
-					if op.GID != 0 {
-						if _, ok := cfg.Groups[op.GID]; !ok {
-							fmt.Printf("Move: ")
-							fmt.Printf("target GID %d not exists\n", op.GID)
-							break
-						}
-					}
-					cfg.Shards[op.Shard] = op.GID
-					cfg.Num++
-					sc.configs = append(sc.configs, cfg)
-					fmt.Println(sc.configs[len(sc.configs)-1])
-				default:
-					panic(fmt.Sprintf("Apply unknown optype: %s", op.Type))
-				}
-				sc.lastSeq[op.ClientID] = op.Seq
-			}
-			res := OpResult{
-				Err:      OK,
-				ClientID: op.ClientID,
-				Seq:      op.Seq,
-				Config:   cfg,
+				res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
 			}
 			if ch, ok := sc.waitCh[msg.CommandIndex]; ok {
 				select {
@@ -320,136 +411,41 @@ func (sc *ShardCtrler) apply() {
 				default:
 				}
 			}
-		case raftapi.NoOp:
-			fmt.Printf("No-op command applied\n")
+			sc.lastapplied = msg.CommandIndex
+			index := msg.CommandIndex
+			sc.mu.Unlock()
+			sc.maybeTakeSnapshot(index)
+			continue
 		default:
+			sc.mu.Unlock()
 			panic(fmt.Sprintf("unknown command type %T", msg.Command))
 		}
-		sc.lastapplied = msg.CommandIndex
-		index := msg.CommandIndex
-		sc.mu.Unlock()
-		sc.maybeTakeSnapshot(index)
 	}
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
-	op := Op{
-		Type:     "Query",
-		ClientID: args.ClientID,
-		Seq:      args.Seq,
-		Num:      args.Num,
-	}
-	sc.mu.Lock()
-	index, _, isLeader := sc.rf.Start(op)
-	if !isLeader {
-		sc.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return nil
-	}
-	ch := sc.getWaitCh(index)
-	sc.mu.Unlock()
-	defer func() {
-		sc.mu.Lock()
-		sc.removeWaitCh(index)
-		sc.mu.Unlock()
-	}()
-	select {
-	case res := <-ch:
-		reply.Err = res.Err
+	res, err := sc.submit(Op{Type: OpQuery, ClientID: args.ClientID, Seq: args.Seq, Num: args.Num})
+	reply.Err = err
+	if err == OK {
 		reply.Config = res.Config
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
 	}
 	return nil
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) error {
-	op := Op{
-		Type:     "Move",
-		ClientID: args.ClientID,
-		Seq:      args.Seq,
-		Shard:    args.Shard,
-		GID:      args.GID,
-	}
-	sc.mu.Lock()
-	index, _, isLeader := sc.rf.Start(op)
-	if !isLeader {
-		sc.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return nil
-	}
-	ch := sc.getWaitCh(index)
-	sc.mu.Unlock()
-	defer func() {
-		sc.mu.Lock()
-		sc.removeWaitCh(index)
-		sc.mu.Unlock()
-	}()
-	select {
-	case res := <-ch:
-		reply.Err = res.Err
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
-	}
+	_, err := sc.submit(Op{Type: OpMove, ClientID: args.ClientID, Seq: args.Seq, Shard: args.Shard, GID: args.GID})
+	reply.Err = err
 	return nil
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) error {
-	op := Op{
-		Type:     "Leave",
-		ClientID: args.ClientID,
-		Seq:      args.Seq,
-		GID:      args.GID,
-	}
-	sc.mu.Lock()
-	index, _, isLeader := sc.rf.Start(op)
-	if !isLeader {
-		sc.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return nil
-	}
-	ch := sc.getWaitCh(index)
-	sc.mu.Unlock()
-	defer func() {
-		sc.mu.Lock()
-		sc.removeWaitCh(index)
-		sc.mu.Unlock()
-	}()
-	select {
-	case res := <-ch:
-		reply.Err = res.Err
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
-	}
+	_, err := sc.submit(Op{Type: OpLeave, ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
+	reply.Err = err
 	return nil
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) error {
-	op := Op{
-		Type:     "Join",
-		ClientID: args.ClientID,
-		Seq:      args.Seq,
-		GID:      args.GID,
-	}
-	sc.mu.Lock()
-	index, _, isLeader := sc.rf.Start(op)
-	if !isLeader {
-		sc.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return nil
-	}
-	ch := sc.getWaitCh(index)
-	sc.mu.Unlock()
-	defer func() {
-		sc.mu.Lock()
-		sc.removeWaitCh(index)
-		sc.mu.Unlock()
-	}()
-	select {
-	case res := <-ch:
-		reply.Err = res.Err
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
-	}
+	_, err := sc.submit(Op{Type: OpJoin, ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
+	reply.Err = err
 	return nil
 }

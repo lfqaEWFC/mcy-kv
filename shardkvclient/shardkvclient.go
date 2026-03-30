@@ -90,6 +90,7 @@ func (ck *Clerk) Put(key string, value string) {
 
 				case shardkv.ErrTimeout:
 					time.Sleep(100 * time.Millisecond)
+					fmt.Printf("timeout\n")
 					goto RETRY
 				}
 			} else {
@@ -139,6 +140,7 @@ func (ck *Clerk) Get(key string) string {
 
 				case shardkv.ErrTimeout:
 					time.Sleep(100 * time.Millisecond)
+					fmt.Printf("timeout\n")
 					goto RETRY
 				}
 			} else {
