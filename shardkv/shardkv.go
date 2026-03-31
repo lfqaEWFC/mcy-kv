@@ -677,19 +677,14 @@ func (shardkv *ShardServer) Put(args PutArgs, reply *PutReply) error {
 		reply.Err = ErrWrongGroup
 		return nil
 	}
-	if shardkv.lastshardseq[shard][args.ClientID] >= args.Seq {
-		if shardkv.shardState[shard] != Serving {
-			shardkv.mu.Unlock()
-			reply.Err = ErrWrongGroup
-			return nil
-		}
-		reply.Err = OK
-		shardkv.mu.Unlock()
-		return nil
-	}
 	if shardkv.shardState[shard] != Serving {
 		shardkv.mu.Unlock()
 		reply.Err = ErrWrongGroup
+		return nil
+	}
+	if shardkv.lastshardseq[shard][args.ClientID] >= args.Seq {
+		reply.Err = OK
+		shardkv.mu.Unlock()
 		return nil
 	}
 	shardkv.mu.Unlock()
@@ -750,20 +745,15 @@ func (shardkv *ShardServer) Get(args GetArgs, reply *GetReply) error {
 		reply.Err = ErrWrongGroup
 		return nil
 	}
-	if shardkv.lastshardseq[shard][args.ClientID] >= args.Seq {
-		if shardkv.shardState[shard] != Serving {
-			shardkv.mu.Unlock()
-			reply.Err = ErrWrongGroup
-			return nil
-		}
-		reply.Err = OK
-		reply.Value = shardkv.lastshardcmd[shard][args.ClientID].Value
-		shardkv.mu.Unlock()
-		return nil
-	}
 	if shardkv.shardState[shard] != Serving {
 		shardkv.mu.Unlock()
 		reply.Err = ErrWrongGroup
+		return nil
+	}
+	if shardkv.lastshardseq[shard][args.ClientID] >= args.Seq {
+		reply.Err = OK
+		reply.Value = shardkv.lastshardcmd[shard][args.ClientID].Value
+		shardkv.mu.Unlock()
 		return nil
 	}
 	shardkv.mu.Unlock()
