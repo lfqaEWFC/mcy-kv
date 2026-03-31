@@ -115,6 +115,10 @@ func init() {
 	labgob.Register(shardctrler.Config{})
 }
 
+func (shardkv *ShardServer) has_apply(index int) bool {
+	return index <= shardkv.lastApplied
+}
+
 func call(addr string, rpcname string, args interface{}, reply interface{}) bool {
 	c, err := rpc.DialHTTP("tcp", addr)
 	if err != nil {
@@ -354,7 +358,7 @@ func (shardkv *ShardServer) applier() {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] == Pulling && op.ConfigNum == shardkv.pendingConfig.Num {
+				if shardkv.shardState[shard] == Pulling {
 					newKV := make(map[string]string)
 					for k, v := range op.Data {
 						newKV[k] = v
@@ -380,7 +384,7 @@ func (shardkv *ShardServer) applier() {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] == GC && op.ConfigNum == shardkv.pendingConfig.Num {
+				if shardkv.shardState[shard] == GC {
 					shardkv.shardState[shard] = Serving
 					fmt.Printf("gid %d shard %d: gc end\n", shardkv.gid, shard)
 					fmt.Printf("gid %d:	", shardkv.gid)
@@ -396,7 +400,7 @@ func (shardkv *ShardServer) applier() {
 					break
 				}
 				shard := op.Shard
-				if shardkv.shardState[shard] == BePulling && op.ConfigNum == shardkv.pendingConfig.Num {
+				if shardkv.shardState[shard] == BePulling {
 					delete(shardkv.shardkv, shard)
 					delete(shardkv.lastshardseq, shard)
 					delete(shardkv.lastshardcmd, shard)
@@ -508,30 +512,41 @@ func (shardkv *ShardServer) Puller() {
 		}
 		shardkv.mu.Lock()
 		pendingNum := shardkv.pendingConfig.Num
-		for shard, state := range shardkv.shardState {
+		shardstateCopy := make(map[int]ShardState, shardctrler.NShards)
+		for cid, state := range shardkv.shardState {
+			shardstateCopy[cid] = state
+		}
+		configCopy := ctrlerclient.CopyConfig(shardkv.config)
+		shardkv.mu.Unlock()
+		for shard, state := range shardstateCopy {
 			if state != Pulling {
 				continue
 			}
-			oldGID := shardkv.config.Shards[shard]
+			oldGID := configCopy.Shards[shard]
 			if oldGID == 0 {
 				op := Op{
 					Type:      "InsertShard",
 					Shard:     shard,
 					Data:      make(map[string]string),
 					ClientSeq: make(map[int64]int64),
+					ClientCmd: make(map[int64]OpResult),
 					ConfigNum: pendingNum,
+				}
+				shardkv.mu.Lock()
+				if shardkv.pendingConfig.Num != pendingNum ||
+					shardkv.shardState[shard] != Pulling {
+					shardkv.mu.Unlock()
+					continue
 				}
 				shardkv.mu.Unlock()
 				shardkv.rf.Start(op)
-				shardkv.mu.Lock()
 				continue
 			}
-			servers, _ := shardkv.config.Groups[oldGID]
+			servers, _ := configCopy.Groups[oldGID]
 			serversCopy := make([]string, len(servers))
 			for cid, srv := range servers {
 				serversCopy[cid] = srv
 			}
-			shardkv.mu.Unlock()
 			var shardData map[string]string
 			var clientSeq map[int64]int64
 			var clientCmd map[int64]OpResult
@@ -551,7 +566,6 @@ func (shardkv *ShardServer) Puller() {
 				}
 			}
 			if !success {
-				shardkv.mu.Lock()
 				continue
 			}
 			op := Op{
@@ -562,11 +576,15 @@ func (shardkv *ShardServer) Puller() {
 				ClientCmd: clientCmd,
 				ConfigNum: pendingNum,
 			}
-			shardkv.rf.Start(op)
-
 			shardkv.mu.Lock()
+			if shardkv.pendingConfig.Num != pendingNum ||
+				shardkv.shardState[shard] != Pulling {
+				shardkv.mu.Unlock()
+				continue
+			}
+			shardkv.mu.Unlock()
+			shardkv.rf.Start(op)
 		}
-		shardkv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -580,29 +598,38 @@ func (shardkv *ShardServer) gcWorker() {
 		}
 		shardkv.mu.Lock()
 		pendingNum := shardkv.pendingConfig.Num
-
-		for shard, state := range shardkv.shardState {
+		shardstateCopy := make(map[int]ShardState, shardctrler.NShards)
+		for cid, state := range shardkv.shardState {
+			shardstateCopy[cid] = state
+		}
+		configCopy := ctrlerclient.CopyConfig(shardkv.config)
+		shardkv.mu.Unlock()
+		for shard, state := range shardstateCopy {
 			if state != GC {
 				continue
 			}
-			oldGID := shardkv.config.Shards[shard]
+			oldGID := configCopy.Shards[shard]
 			if oldGID == 0 {
 				op := Op{
 					Type:      "GCComplete",
 					Shard:     shard,
 					ConfigNum: pendingNum,
 				}
+				shardkv.mu.Lock()
+				if shardkv.pendingConfig.Num != pendingNum ||
+					shardkv.shardState[shard] != GC {
+					shardkv.mu.Unlock()
+					continue
+				}
 				shardkv.mu.Unlock()
 				shardkv.rf.Start(op)
-				shardkv.mu.Lock()
 				continue
 			}
-			servers, _ := shardkv.config.Groups[oldGID]
+			servers, _ := configCopy.Groups[oldGID]
 			serversCopy := make([]string, len(servers))
 			for cid, srv := range servers {
 				serversCopy[cid] = srv
 			}
-			shardkv.mu.Unlock()
 			success := false
 			for _, srv := range serversCopy {
 				args := DeleteShardArgs{
@@ -613,7 +640,7 @@ func (shardkv *ShardServer) gcWorker() {
 
 				if call(srv, "ShardServer.DeleteShard", args, &reply) && reply.Err == OK {
 					success = true
-					fmt.Printf("gid %d shard %d: ", shardkv.gid, shard)
+					fmt.Printf("gid %d shard %d: ", oldGID, shard)
 					fmt.Printf("call delete success,next is gc\n")
 					break
 				}
@@ -624,11 +651,16 @@ func (shardkv *ShardServer) gcWorker() {
 					Shard:     shard,
 					ConfigNum: pendingNum,
 				}
+				shardkv.mu.Lock()
+				if shardkv.pendingConfig.Num != pendingNum ||
+					shardkv.shardState[shard] != GC {
+					shardkv.mu.Unlock()
+					continue
+				}
+				shardkv.mu.Unlock()
 				shardkv.rf.Start(op)
 			}
-			shardkv.mu.Lock()
 		}
-		shardkv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -678,6 +710,12 @@ func (shardkv *ShardServer) Put(args PutArgs, reply *PutReply) error {
 
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
+	if shardkv.has_apply(index) {
+		reply.Err = ErrTimeout
+		shardkv.removeWaitCh(index)
+		shardkv.mu.Unlock()
+		return nil
+	}
 	shardkv.mu.Unlock()
 
 	defer func() {
@@ -745,6 +783,12 @@ func (shardkv *ShardServer) Get(args GetArgs, reply *GetReply) error {
 
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
+	if shardkv.has_apply(index) {
+		reply.Err = ErrTimeout
+		shardkv.removeWaitCh(index)
+		shardkv.mu.Unlock()
+		return nil
+	}
 	shardkv.mu.Unlock()
 
 	defer func() {
@@ -840,6 +884,12 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 	}
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
+	if shardkv.has_apply(index) {
+		reply.Err = OK
+		shardkv.removeWaitCh(index)
+		shardkv.mu.Unlock()
+		return nil
+	}
 	shardkv.mu.Unlock()
 	defer func() {
 		shardkv.mu.Lock()

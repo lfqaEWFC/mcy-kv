@@ -59,6 +59,7 @@ type ShardCtrler struct {
 	applyCh      chan raftapi.ApplyMsg
 	configs      []Config
 	lastSeq      map[int64]int
+	lastCmd      map[int64]OpResult
 	waitCh       map[int]chan OpResult
 }
 type QueryArgs struct {
@@ -107,6 +108,7 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		maxraftstate: maxraftstate,
 		configs:      make([]Config, 1),
 		lastSeq:      make(map[int64]int),
+		lastCmd:      make(map[int64]OpResult),
 		waitCh:       make(map[int]chan OpResult),
 	}
 	labgob.Register(Op{})
@@ -166,6 +168,9 @@ func (sc *ShardCtrler) submit(op Op) (OpResult, Err) {
 
 	select {
 	case res := <-ch:
+		if res.ClientID != op.ClientID || res.Seq != op.Seq {
+			return OpResult{}, ErrWrongLeader
+		}
 		return res, res.Err
 	case <-time.After(500 * time.Millisecond):
 		return OpResult{}, ErrTimeout
@@ -319,6 +324,7 @@ func (sc *ShardCtrler) restoreFromSnapshot(snapshot []byte) {
 	var data struct {
 		Configs []Config
 		LastSeq map[int64]int
+		LastCmd map[int64]OpResult
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
@@ -327,6 +333,7 @@ func (sc *ShardCtrler) restoreFromSnapshot(snapshot []byte) {
 	}
 	sc.configs = data.Configs
 	sc.lastSeq = data.LastSeq
+	sc.lastCmd = data.LastCmd
 }
 
 func (sc *ShardCtrler) maybeTakeSnapshot(index int) {
@@ -347,15 +354,21 @@ func (sc *ShardCtrler) maybeTakeSnapshot(index int) {
 	for cid, seq := range sc.lastSeq {
 		scCopyLastSeq[cid] = seq
 	}
+	scCopyLastCmd := make(map[int64]OpResult)
+	for cid, cmd := range sc.lastCmd {
+		scCopyLastCmd[cid] = cmd
+	}
 	sc.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(struct {
 		Configs []Config
 		LastSeq map[int64]int
+		LastCmd map[int64]OpResult
 	}{
 		Configs: scCopyConfigs,
 		LastSeq: scCopyLastSeq,
+		LastCmd: scCopyLastCmd,
 	})
 	sc.rf.Snapshot(lastApplied, w.Bytes())
 }
@@ -384,12 +397,14 @@ func (sc *ShardCtrler) apply() {
 		case Op:
 			op := cmd
 			var res OpResult
-			if op.Type == OpQuery {
-				cfg := sc.queryConfigLocked(op.Num)
-				res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
+			last, exists := sc.lastSeq[op.ClientID]
+			if exists && op.Seq <= last {
+				res = sc.lastCmd[op.ClientID]
 			} else {
-				last, exists := sc.lastSeq[op.ClientID]
-				if !exists || op.Seq > last {
+				if op.Type == OpQuery {
+					cfg := sc.queryConfigLocked(op.Num)
+					res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
+				} else {
 					switch op.Type {
 					case OpJoin:
 						_ = sc.applyJoinLocked(op.GID)
@@ -401,9 +416,10 @@ func (sc *ShardCtrler) apply() {
 						sc.mu.Unlock()
 						panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
 					}
-					sc.lastSeq[op.ClientID] = op.Seq
+					res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
 				}
-				res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+				sc.lastSeq[op.ClientID] = op.Seq
+				sc.lastCmd[op.ClientID] = res
 			}
 			if ch, ok := sc.waitCh[msg.CommandIndex]; ok {
 				select {
