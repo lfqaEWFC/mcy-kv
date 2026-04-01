@@ -122,6 +122,45 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 	cfg1 := Config{
 		Num: 1,
 		Shards: [NShards]int{
+			3, 3, 3,
+			3, 3, 3,
+			3, 3, 3,
+			3,
+		},
+		Groups: groupConfig,
+	}
+
+	sc.configs = append(sc.configs, cfg1)
+
+	cfg2 := Config{
+		Num: 2,
+		Shards: [NShards]int{
+			1, 1, 1,
+			1, 1, 1,
+			1, 1, 1,
+			1,
+		},
+		Groups: groupConfig,
+	}
+
+	sc.configs = append(sc.configs, cfg2)
+
+	cfg3 := Config{
+		Num: 3,
+		Shards: [NShards]int{
+			2, 2, 2,
+			2, 2, 2,
+			2, 2, 2,
+			2,
+		},
+		Groups: groupConfig,
+	}
+
+	sc.configs = append(sc.configs, cfg3)
+
+	cfg4 := Config{
+		Num: 4,
+		Shards: [NShards]int{
 			1, 1, 1,
 			2, 2, 2,
 			3, 3, 3,
@@ -130,7 +169,7 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		Groups: groupConfig,
 	}
 
-	sc.configs = append(sc.configs, cfg1)
+	sc.configs = append(sc.configs, cfg4)
 
 	go sc.apply()
 

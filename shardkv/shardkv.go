@@ -343,6 +343,7 @@ func (shardkv *ShardServer) applier() {
 					}
 					shardkv.pendingConfig = ctrlerclient.CopyConfig(op.Config)
 					shardkv.applyConfig(op.Config)
+					fmt.Printf("gid %d: ", shardkv.gid)
 					fmt.Printf("pending config %d\n", op.Config.Num)
 					if shardkv.allServing() {
 						fmt.Printf("gid : %d\n", shardkv.gid)
@@ -350,7 +351,7 @@ func (shardkv *ShardServer) applier() {
 						fmt.Println(shardkv.config)
 					}
 				} else {
-					fmt.Printf("gid %d ", shardkv.gid)
+					fmt.Printf("gid %d: ", shardkv.gid)
 					fmt.Printf("received old/duplicate config %d\n", op.Config.Num)
 				}
 			} else if op.Type == "InsertShard" {
@@ -640,7 +641,7 @@ func (shardkv *ShardServer) gcWorker() {
 
 				if call(srv, "ShardServer.DeleteShard", args, &reply) && reply.Err == OK {
 					success = true
-					fmt.Printf("gid %d shard %d: ", oldGID, shard)
+					fmt.Printf("gid %d shard %d: ", shardkv.gid, shard)
 					fmt.Printf("call delete success,next is gc\n")
 					break
 				}
