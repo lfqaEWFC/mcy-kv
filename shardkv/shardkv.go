@@ -480,7 +480,6 @@ func (shardkv *ShardServer) applier() {
 }
 
 func (shardkv *ShardServer) configPoller() {
-	time.Sleep(3 * time.Second) //给kv从raft收敛状态预留时间
 	for {
 		_, isLeader := shardkv.rf.GetState()
 		if !isLeader {
