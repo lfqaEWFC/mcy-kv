@@ -51,23 +51,27 @@ func (ck *Clerk) Put(key string, value string) {
 		server := ck.servers[ck.leader]
 		var reply kv.PutReply
 		ok := call(server, "KVServer.Put", &args, &reply)
-		if ok {
-			switch reply.Err {
-			case kv.OK:
-				fmt.Printf("success: %s = %s\n", key, value)
-				return
-			case kv.ErrWrongLeader:
-				fmt.Println("wrong leader")
-			case kv.ErrTimeout:
-				fmt.Println("timeout")
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		} else {
+		if !ok {
 			fmt.Println("rpc failed")
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		time.Sleep(50 * time.Millisecond)
+		switch reply.Err {
+		case kv.OK:
+			fmt.Printf("success: %s = %s\n", key, value)
+			return
+		case kv.ErrWrongLeader:
+			fmt.Println("wrong leader")
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			time.Sleep(50 * time.Millisecond)
+		case kv.ErrTimeout:
+			fmt.Println("timeout")
+			time.Sleep(100 * time.Millisecond)
+		default:
+			fmt.Printf("unexpected error: %s\n", reply.Err)
+			return
+		}
 	}
 }
 
@@ -82,26 +86,30 @@ func (ck *Clerk) Get(key string) string {
 		server := ck.servers[ck.leader]
 		var reply kv.GetReply
 		ok := call(server, "KVServer.Get", &args, &reply)
-		if ok {
-			switch reply.Err {
-			case kv.OK:
-				if reply.Value == "" {
-					fmt.Printf("success: %s is not found\n", key)
-					return reply.Value
-				}
-				fmt.Printf("success: %s = %s\n", key, reply.Value)
-				return reply.Value
-			case kv.ErrWrongLeader:
-				fmt.Println("wrong leader")
-			case kv.ErrTimeout:
-				fmt.Println("timeout")
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		} else {
+		if !ok {
 			fmt.Println("rpc failed")
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		time.Sleep(50 * time.Millisecond)
+		switch reply.Err {
+		case kv.OK:
+			if reply.Value == "" {
+				fmt.Printf("success: %s is not found\n", key)
+				return reply.Value
+			}
+			fmt.Printf("success: %s = %s\n", key, reply.Value)
+			return reply.Value
+		case kv.ErrWrongLeader:
+			fmt.Println("wrong leader")
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			time.Sleep(50 * time.Millisecond)
+		case kv.ErrTimeout:
+			fmt.Println("timeout")
+			time.Sleep(100 * time.Millisecond)
+		default:
+			fmt.Printf("unexpected error: %s\n", reply.Err)
+			return ""
+		}
 	}
 }

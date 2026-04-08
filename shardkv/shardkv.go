@@ -3,6 +3,7 @@ package shardkv
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"mcy-kv/ctrlerclient"
 	"mcy-kv/labgob"
 	"mcy-kv/raftapi"
@@ -28,6 +29,17 @@ const (
 	ErrWrongGroup  Err = "ErrWrongGroup"
 	ErrTimeout     Err = "ErrTimeout"
 )
+
+const (
+	tickInterval = 100 * time.Millisecond
+	hbInterval   = 300 * time.Millisecond
+)
+
+type QPSStats struct {
+	emaQPS       float64
+	requestCount int64
+	alpha        float64
+}
 
 type Op struct {
 	Type      string
@@ -108,15 +120,31 @@ type ShardServer struct {
 	config        shardctrler.Config
 	pendingConfig shardctrler.Config
 	shardState    map[int]ShardState
+	stats         QPSStats
+	emaQPS        float64
+}
+
+func (s *QPSStats) Tick() {
+	newQPS := float64(s.requestCount)
+	s.requestCount = 0
+	delta := math.Abs(newQPS - s.emaQPS)
+	if s.emaQPS == 0 {
+		s.alpha = 0.5
+	} else {
+		s.alpha = delta / s.emaQPS
+		if s.alpha < 0.1 {
+			s.alpha = 0.1
+		}
+		if s.alpha > 0.9 {
+			s.alpha = 0.9
+		}
+	}
+	s.emaQPS = s.alpha*s.emaQPS + (1-s.alpha)*newQPS
 }
 
 func init() {
 	labgob.Register(Op{})
 	labgob.Register(shardctrler.Config{})
-}
-
-func (shardkv *ShardServer) has_apply(index int) bool {
-	return index <= shardkv.lastApplied
 }
 
 func call(addr string, rpcname string, args interface{}, reply interface{}) bool {
@@ -128,6 +156,7 @@ func call(addr string, rpcname string, args interface{}, reply interface{}) bool
 
 	done := make(chan error, 1)
 
+	//协程如果超时就无法被清理，可能会有内存泄漏的问题
 	go func() {
 		done <- c.Call(rpcname, args, reply)
 	}()
@@ -160,6 +189,8 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int,
 	go shardkv.configPoller()
 	go shardkv.Puller()
 	go shardkv.gcWorker()
+	go shardkv.TickLoop(tickInterval)
+	go shardkv.HeartbeatLoop(hbInterval)
 	return shardkv
 }
 
@@ -179,6 +210,7 @@ func (shardkv *ShardServer) getWaitCh(index int) chan OpResult {
 	return ch
 }
 
+// 目前的实现中，waitCh 超时会有内存泄漏的问题
 func (shardkv *ShardServer) removeWaitCh(index int) {
 	delete(shardkv.waitCh, index)
 }
@@ -306,15 +338,7 @@ func (shardkv *ShardServer) maybeTakeSnapshot() {
 		panic(fmt.Sprintf("KVServer maybeTakeSnapshot encode failed: %v", err))
 	}
 	snapshotBytes := w.Bytes()
-
 	shardkv.rf.Snapshot(lastApplied, snapshotBytes)
-	shardkv.mu.Lock()
-	for idx := range shardkv.waitCh {
-		if idx <= lastApplied {
-			delete(shardkv.waitCh, idx)
-		}
-	}
-	shardkv.mu.Unlock()
 }
 
 func (shardkv *ShardServer) applier() {
@@ -414,16 +438,16 @@ func (shardkv *ShardServer) applier() {
 						fmt.Printf("gid : %d\n", shardkv.gid)
 						fmt.Println(shardkv.config)
 					}
-					if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
-						select {
-						case ch <- OpResult{}:
-						default:
-						}
+					ch := shardkv.getWaitCh(msg.CommandIndex)
+					select {
+					case ch <- OpResult{}:
+					default:
 					}
 				}
 			} else {
 				shard := key_shard(op.Key)
 				last := shardkv.lastshardseq[shard][op.ClientID]
+				shardkv.stats.requestCount++
 				var res OpResult
 				if op.Seq > last {
 					switch op.Type {
@@ -461,11 +485,10 @@ func (shardkv *ShardServer) applier() {
 						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
 					}
 				}
-				if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
-					select {
-					case ch <- res:
-					default:
-					}
+				ch := shardkv.getWaitCh(msg.CommandIndex)
+				select {
+				case ch <- res:
+				default:
 				}
 			}
 		case raftapi.NoOp:
@@ -543,7 +566,7 @@ func (shardkv *ShardServer) Puller() {
 				continue
 			}
 			servers, _ := configCopy.Groups[oldGID]
-			serversCopy := make([]string, len(servers))
+			serversCopy := make(map[int]string, len(servers))
 			for cid, srv := range servers {
 				serversCopy[cid] = srv
 			}
@@ -626,7 +649,7 @@ func (shardkv *ShardServer) gcWorker() {
 				continue
 			}
 			servers, _ := configCopy.Groups[oldGID]
-			serversCopy := make([]string, len(servers))
+			serversCopy := make(map[int]string, len(servers))
 			for cid, srv := range servers {
 				serversCopy[cid] = srv
 			}
@@ -662,6 +685,35 @@ func (shardkv *ShardServer) gcWorker() {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (shardkv *ShardServer) TickLoop(tickInterval time.Duration) {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		shardkv.mu.Lock()
+		shardkv.stats.Tick()
+		load := shardkv.stats.emaQPS
+		shardkv.emaQPS = load
+		fmt.Printf("gid %d emaQPS: ", shardkv.gid)
+		fmt.Println(shardkv.stats.emaQPS)
+		shardkv.mu.Unlock()
+	}
+}
+
+func (shardkv *ShardServer) HeartbeatLoop(hbInterval time.Duration) {
+	ticker := time.NewTicker(hbInterval)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		shardkv.mu.Lock()
+		gid := shardkv.gid
+		configNum := shardkv.config.Num
+		load := shardkv.stats.emaQPS
+		shardkv.mu.Unlock()
+		shardkv.ck.Heartbeat(gid, configNum, load)
 	}
 }
 
@@ -705,12 +757,6 @@ func (shardkv *ShardServer) Put(args PutArgs, reply *PutReply) error {
 
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
-	if shardkv.has_apply(index) {
-		reply.Err = ErrTimeout
-		shardkv.removeWaitCh(index)
-		shardkv.mu.Unlock()
-		return nil
-	}
 	shardkv.mu.Unlock()
 
 	defer func() {
@@ -773,12 +819,6 @@ func (shardkv *ShardServer) Get(args GetArgs, reply *GetReply) error {
 
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
-	if shardkv.has_apply(index) {
-		reply.Err = ErrTimeout
-		shardkv.removeWaitCh(index)
-		shardkv.mu.Unlock()
-		return nil
-	}
 	shardkv.mu.Unlock()
 
 	defer func() {
@@ -811,10 +851,6 @@ func (shardkv *ShardServer) PullShard(args PullShardArgs, reply *PullShardReply)
 		return nil
 	}
 	if args.ConfigNum != shardkv.pendingConfig.Num {
-		reply.Err = ErrWrongGroup
-		return nil
-	}
-	if args.Shard < 0 || args.Shard >= shardctrler.NShards {
 		reply.Err = ErrWrongGroup
 		return nil
 	}
@@ -874,12 +910,6 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 	}
 	shardkv.mu.Lock()
 	ch := shardkv.getWaitCh(index)
-	if shardkv.has_apply(index) {
-		reply.Err = OK
-		shardkv.removeWaitCh(index)
-		shardkv.mu.Unlock()
-		return nil
-	}
 	shardkv.mu.Unlock()
 	defer func() {
 		shardkv.mu.Lock()

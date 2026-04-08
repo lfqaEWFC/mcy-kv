@@ -70,10 +70,10 @@ func (c *Client) Query(num int) shardctrler.Config {
 			id = (id + 1) % len(c.peers)
 			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error : %v\n", reply.Err)
-			time.Sleep(50 * time.Millisecond)
+			return reply.Config
 		}
 	}
 }
@@ -111,7 +111,7 @@ func (c *Client) Move(shard int, targetGID int) bool {
 			id = (id + 1) % len(c.peers)
 			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error : %v\n", reply.Err)
 			return false
@@ -151,7 +151,7 @@ func (c *Client) Leave(targetGID int) bool {
 			id = (id + 1) % len(c.peers)
 			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error: %v\n", reply.Err)
 			return false
@@ -191,10 +191,55 @@ func (c *Client) Join(targetGID int) bool {
 			id = (id + 1) % len(c.peers)
 			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error: %v\n", reply.Err)
 			return false
+		}
+	}
+}
+
+// 调用 Heartbeat 发送心跳
+func (c *Client) Heartbeat(gid int, configNum int, load float64) error {
+	c.seq += 1
+	args := shardctrler.HeartBeatArgs{
+		GID:       gid,
+		ClientID:  c.clientID,
+		Seq:       c.seq,
+		Num:       configNum,
+		GroupLoad: load,
+	}
+	var reply shardctrler.HeartBeatReply
+	id := 0
+	for {
+		addr := c.peers[id]
+		rpcClient, err := rpc.DialHTTP("tcp", addr)
+		if err != nil {
+			id = (id + 1) % len(c.peers)
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		fmt.Printf("Call ShardCtrler.Heartbeat\n")
+		err = rpcClient.Call("ShardCtrler.Heartbeat", &args, &reply)
+		rpcClient.Close()
+		if err != nil {
+			fmt.Println(err)
+			id = (id + 1) % len(c.peers)
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		fmt.Println(reply.Err)
+		switch reply.Err {
+		case shardctrler.OK:
+			return nil
+		case shardctrler.ErrWrongLeader:
+			id = (id + 1) % len(c.peers)
+			time.Sleep(50 * time.Millisecond)
+		case shardctrler.ErrTimeout:
+			time.Sleep(100 * time.Millisecond)
+		default:
+			fmt.Printf("unexpected error: %v\n", reply.Err)
+			return nil
 		}
 	}
 }

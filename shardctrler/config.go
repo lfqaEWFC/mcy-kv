@@ -25,10 +25,11 @@ const (
 )
 
 const (
-	OpQuery = "Query"
-	OpJoin  = "Join"
-	OpLeave = "Leave"
-	OpMove  = "Move"
+	OpQuery     = "Query"
+	OpJoin      = "Join"
+	OpLeave     = "Leave"
+	OpMove      = "Move"
+	OpHeartBeat = "HeartBeat"
 )
 
 type Err string
@@ -38,12 +39,13 @@ type Config struct {
 	Groups map[int]map[int]string
 }
 type Op struct {
-	Type     string
-	ClientID int64
-	Seq      int
-	Num      int
-	Shard    int
-	GID      int
+	Type      string
+	ClientID  int64
+	Seq       int
+	Num       int
+	Shard     int
+	GID       int
+	GroupLoad float64
 }
 type OpResult struct {
 	Err      Err
@@ -61,6 +63,7 @@ type ShardCtrler struct {
 	lastSeq      map[int64]int
 	lastCmd      map[int64]OpResult
 	waitCh       map[int]chan OpResult
+	groupStats   map[int]*GroupStat
 }
 type QueryArgs struct {
 	Num      int
@@ -101,6 +104,24 @@ type JoinReply struct {
 	Err Err
 }
 
+type HeartBeatArgs struct {
+	GID       int
+	ClientID  int64
+	Seq       int
+	Num       int
+	GroupLoad float64
+}
+
+type HeartBeatReply struct {
+	Err Err
+}
+
+type GroupStat struct {
+	Load      float64
+	ConfigNum int
+	LastBeat  time.Time
+}
+
 func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int) *ShardCtrler {
 	sc := &ShardCtrler{
 		rf:           rf,
@@ -110,6 +131,7 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		lastSeq:      make(map[int64]int),
 		lastCmd:      make(map[int64]OpResult),
 		waitCh:       make(map[int]chan OpResult),
+		groupStats:   make(map[int]*GroupStat),
 	}
 	labgob.Register(Op{})
 	labgob.Register(Config{})
@@ -277,6 +299,21 @@ func (sc *ShardCtrler) applyMoveLocked(shard, gid int) Config {
 	cfg.Num++
 	sc.configs = append(sc.configs, cfg)
 	return cfg
+}
+
+func (sc *ShardCtrler) applyHeartBeatLocked(gid int, num int, groupload float64) {
+	stat, ok := sc.groupStats[gid]
+	if !ok {
+		stat = &GroupStat{}
+		sc.groupStats[gid] = stat
+	}
+	if num < stat.ConfigNum {
+		return
+	}
+	stat.ConfigNum = num
+	stat.Load = groupload
+	stat.LastBeat = time.Now()
+	fmt.Println(sc.groupStats[gid])
 }
 
 func (sc *ShardCtrler) rebalanceLocked(cfg *Config) {
@@ -451,6 +488,8 @@ func (sc *ShardCtrler) apply() {
 						_ = sc.applyLeaveLocked(op.GID)
 					case OpMove:
 						_ = sc.applyMoveLocked(op.Shard, op.GID)
+					case OpHeartBeat:
+						sc.applyHeartBeatLocked(op.GID, op.Num, op.GroupLoad)
 					default:
 						sc.mu.Unlock()
 						panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
@@ -479,7 +518,8 @@ func (sc *ShardCtrler) apply() {
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
-	res, err := sc.submit(Op{Type: OpQuery, ClientID: args.ClientID, Seq: args.Seq, Num: args.Num})
+	res, err := sc.submit(Op{Type: OpQuery,
+		ClientID: args.ClientID, Seq: args.Seq, Num: args.Num})
 	reply.Err = err
 	if err == OK {
 		reply.Config = res.Config
@@ -488,19 +528,31 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) error {
-	_, err := sc.submit(Op{Type: OpMove, ClientID: args.ClientID, Seq: args.Seq, Shard: args.Shard, GID: args.GID})
+	_, err := sc.submit(Op{Type: OpMove,
+		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID,
+		Shard: args.Shard})
 	reply.Err = err
 	return nil
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) error {
-	_, err := sc.submit(Op{Type: OpLeave, ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
+	_, err := sc.submit(Op{Type: OpLeave,
+		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
 	reply.Err = err
 	return nil
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) error {
-	_, err := sc.submit(Op{Type: OpJoin, ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
+	_, err := sc.submit(Op{Type: OpJoin,
+		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID})
+	reply.Err = err
+	return nil
+}
+
+func (sc *ShardCtrler) Heartbeat(args *HeartBeatArgs, reply *HeartBeatReply) error {
+	_, err := sc.submit(Op{Type: OpHeartBeat,
+		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID,
+		Num: args.Num, GroupLoad: args.GroupLoad})
 	reply.Err = err
 	return nil
 }

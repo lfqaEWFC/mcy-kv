@@ -69,36 +69,38 @@ func (ck *Clerk) Put(key string, value string) {
 			ck.leader = 0
 			continue
 		}
-		for i := 0; i < len(servers); i++ {
-			server := servers[ck.leader%len(servers)]
-			var reply shardkv.PutReply
-			ok := call(server, "ShardServer.Put", &args, &reply)
-			if ok {
-				fmt.Printf("Err is %s\n", reply.Err)
-				switch reply.Err {
-				case shardkv.OK:
-					fmt.Printf("success: %s = %s\n", key, value)
-					return
-
-				case shardkv.ErrWrongLeader:
-
-				case shardkv.ErrWrongGroup:
-					ck.config = ck.ctrlck.Query(-1)
-					fmt.Println(ck.config)
-					ck.leader = 0
-					goto RETRY
-
-				case shardkv.ErrTimeout:
-					time.Sleep(100 * time.Millisecond)
-					fmt.Printf("timeout\n")
-					goto RETRY
-				}
-			} else {
-				fmt.Printf("rpc fail\n")
-			}
+		server := servers[ck.leader%len(servers)]
+		var reply shardkv.PutReply
+		ok = call(server, "ShardServer.Put", &args, &reply)
+		if !ok {
+			fmt.Printf("rpc fail,change leader\n")
 			ck.leader = (ck.leader + 1) % len(servers)
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-	RETRY:
+		fmt.Printf("Err is %s\n", reply.Err)
+		switch reply.Err {
+		case shardkv.OK:
+			fmt.Printf("success: %s = %s\n", key, value)
+			return
+
+		case shardkv.ErrWrongLeader:
+			fmt.Printf("wrong leader\n")
+			ck.leader = (ck.leader + 1) % len(servers)
+
+		case shardkv.ErrWrongGroup:
+			ck.config = ck.ctrlck.Query(-1)
+			fmt.Println(ck.config)
+			ck.leader = 0
+
+		case shardkv.ErrTimeout:
+			fmt.Printf("time out\n")
+			time.Sleep(100 * time.Millisecond)
+			continue
+
+		default:
+			fmt.Printf("unexpected error: %s\n", reply.Err)
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -120,35 +122,37 @@ func (ck *Clerk) Get(key string) string {
 			ck.leader = 0
 			continue
 		}
-		for i := 0; i < len(servers); i++ {
-			server := servers[ck.leader%len(servers)]
-			var reply shardkv.GetReply
-			ok := call(server, "ShardServer.Get", &args, &reply)
-			if ok {
-				switch reply.Err {
-				case shardkv.OK:
-					fmt.Printf("success: %s = %s\n", key, reply.Value)
-					return reply.Value
-
-				case shardkv.ErrWrongLeader:
-
-				case shardkv.ErrWrongGroup:
-					ck.config = ck.ctrlck.Query(-1)
-					fmt.Println(ck.config)
-					ck.leader = 0
-					goto RETRY
-
-				case shardkv.ErrTimeout:
-					time.Sleep(100 * time.Millisecond)
-					fmt.Printf("timeout\n")
-					goto RETRY
-				}
-			} else {
-				fmt.Printf("rpc fail\n")
-			}
+		server := servers[ck.leader%len(servers)]
+		var reply shardkv.GetReply
+		ok = call(server, "ShardServer.Get", &args, &reply)
+		if !ok {
+			fmt.Printf("rpc fail,change leader\n")
 			ck.leader = (ck.leader + 1) % len(servers)
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-	RETRY:
+		switch reply.Err {
+		case shardkv.OK:
+			fmt.Printf("success: %s = %s\n", key, reply.Value)
+			return reply.Value
+
+		case shardkv.ErrWrongLeader:
+			fmt.Printf("wrong leader\n")
+			ck.leader = (ck.leader + 1) % len(servers)
+
+		case shardkv.ErrWrongGroup:
+			ck.config = ck.ctrlck.Query(-1)
+			fmt.Println(ck.config)
+			ck.leader = 0
+
+		case shardkv.ErrTimeout:
+			fmt.Printf("time out\n")
+			time.Sleep(100 * time.Millisecond)
+			continue
+
+		default:
+			fmt.Printf("unexpected error: %s\n", reply.Err)
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
