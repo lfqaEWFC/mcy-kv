@@ -106,7 +106,7 @@ func main() {
 					key := fmt.Sprintf("num%d", num)
 					value := fmt.Sprintf("%d", num)
 
-					ck.Put(key, value)
+					ck.Put(value, key)
 					atomic.AddInt64(&totalOps, 1)
 				}
 			}

@@ -78,47 +78,6 @@ func (c *Client) Query(num int) shardctrler.Config {
 	}
 }
 
-// 调用 Move 来移动 shard
-func (c *Client) Move(shard int, targetGID int) bool {
-	c.seq += 1
-	args := shardctrler.MoveArgs{
-		Shard:    shard,
-		GID:      targetGID,
-		ClientID: c.clientID,
-		Seq:      c.seq,
-	}
-	var reply shardctrler.MoveReply
-	id := 0
-	for {
-		addr := c.peers[id]
-		rpcClient, err := rpc.DialHTTP("tcp", addr)
-		if err != nil {
-			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		err = rpcClient.Call("ShardCtrler.Move", &args, &reply)
-		rpcClient.Close()
-		if err != nil {
-			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		switch reply.Err {
-		case shardctrler.OK:
-			return true
-		case shardctrler.ErrWrongLeader:
-			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
-		case shardctrler.ErrTimeout:
-			time.Sleep(100 * time.Millisecond)
-		default:
-			fmt.Printf("unexpected error : %v\n", reply.Err)
-			return false
-		}
-	}
-}
-
 // 调用 Leave 删除 Config 中指定 gid 的 group
 func (c *Client) Leave(targetGID int) bool {
 	c.seq += 1
@@ -219,16 +178,13 @@ func (c *Client) Heartbeat(gid int, configNum int, load float64) error {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		fmt.Printf("Call ShardCtrler.Heartbeat\n")
 		err = rpcClient.Call("ShardCtrler.Heartbeat", &args, &reply)
 		rpcClient.Close()
 		if err != nil {
-			fmt.Println(err)
 			id = (id + 1) % len(c.peers)
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		fmt.Println(reply.Err)
 		switch reply.Err {
 		case shardctrler.OK:
 			return nil

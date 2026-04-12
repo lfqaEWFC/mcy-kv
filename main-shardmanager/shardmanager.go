@@ -44,31 +44,6 @@ func main() {
 		case "exit":
 			return
 
-		case "move":
-			if len(args) != 3 {
-				fmt.Println("usage: move <shard> <targetGID>")
-				continue
-			}
-			shard, err1 := strconv.Atoi(args[1])
-			targetGID, err2 := strconv.Atoi(args[2])
-			if err1 != nil || err2 != nil {
-				fmt.Println("shard and targetGID must be integers")
-				continue
-			}
-			if shard < 0 || shard >= NShards {
-				fmt.Println("shard index out of range")
-				continue
-			}
-			if targetGID <= 0 || targetGID > Groups {
-				fmt.Println("targetGID out of range")
-				continue
-			}
-			if ck.Move(shard, targetGID) {
-				fmt.Printf("Move shard %d -> GID %d submitted successfully\n", shard, targetGID)
-			} else {
-				fmt.Println("Move failed")
-			}
-
 		case "leave":
 			if len(args) != 2 {
 				fmt.Println("usage: leave <targetGID>")

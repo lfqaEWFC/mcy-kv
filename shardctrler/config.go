@@ -32,6 +32,13 @@ const (
 	OpHeartBeat = "HeartBeat"
 )
 
+const maxDiff = 5.0
+const threshold = 3.0
+const HeartbeatInterval = 300 * time.Millisecond
+const MonitorInterval = HeartbeatInterval
+const cooldown = 2 * HeartbeatInterval
+const HeartbeatTimeout = 3 * HeartbeatInterval
+
 type Err string
 type Config struct {
 	Num    int
@@ -39,19 +46,21 @@ type Config struct {
 	Groups map[int]map[int]string
 }
 type Op struct {
-	Type      string
-	ClientID  int64
-	Seq       int
-	Num       int
-	Shard     int
-	GID       int
-	GroupLoad float64
+	Type       string
+	ClientID   int64
+	Seq        int
+	Num        int
+	Shard      int
+	GID        int
+	GroupLoad  float64
+	OperatorID int
 }
 type OpResult struct {
-	Err      Err
-	ClientID int64
-	Seq      int
-	Config   Config
+	Err        Err
+	ClientID   int64
+	Seq        int
+	Config     Config
+	OperatorID int
 }
 type ShardCtrler struct {
 	lastapplied  int
@@ -63,7 +72,9 @@ type ShardCtrler struct {
 	lastSeq      map[int64]int
 	lastCmd      map[int64]OpResult
 	waitCh       map[int]chan OpResult
-	groupStats   map[int]*GroupStat
+	groupStats   map[int]GroupStat
+	lastReb      time.Time
+	OperatorID   int
 }
 type QueryArgs struct {
 	Num      int
@@ -75,10 +86,9 @@ type QueryReply struct {
 	Config Config
 }
 type MoveArgs struct {
-	Shard    int
-	GID      int
-	ClientID int64
-	Seq      int
+	Shard      int
+	GID        int
+	OperatorID int
 }
 type MoveReply struct {
 	Err Err
@@ -131,7 +141,9 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 		lastSeq:      make(map[int64]int),
 		lastCmd:      make(map[int64]OpResult),
 		waitCh:       make(map[int]chan OpResult),
-		groupStats:   make(map[int]*GroupStat),
+		groupStats:   make(map[int]GroupStat),
+		lastReb:      time.Now(),
+		OperatorID:   0,
 	}
 	labgob.Register(Op{})
 	labgob.Register(Config{})
@@ -194,8 +206,25 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 	sc.configs = append(sc.configs, cfg4)
 
 	go sc.apply()
+	go sc.TickLoop()
 
 	return sc
+}
+
+func (sc *ShardCtrler) configWeight(stat GroupStat) float64 {
+	currentConfigNum := sc.configs[len(sc.configs)-1].Num
+	d := currentConfigNum - stat.ConfigNum
+	if d < 0 {
+		d = 0
+	}
+	w := 1 - float64(d)/maxDiff
+	if w > 1 {
+		w = 1
+	}
+	if w < 0.2 {
+		w = 0.2
+	}
+	return w
 }
 
 func (sc *ShardCtrler) getWaitCh(index int) chan OpResult {
@@ -229,8 +258,10 @@ func (sc *ShardCtrler) submit(op Op) (OpResult, Err) {
 
 	select {
 	case res := <-ch:
-		if res.ClientID != op.ClientID || res.Seq != op.Seq {
-			return OpResult{}, ErrWrongLeader
+		if op.Type != OpMove {
+			if res.ClientID != op.ClientID || res.Seq != op.Seq {
+				return OpResult{}, ErrWrongLeader
+			}
 		}
 		return res, res.Err
 	case <-time.After(500 * time.Millisecond):
@@ -298,13 +329,14 @@ func (sc *ShardCtrler) applyMoveLocked(shard, gid int) Config {
 	cfg.Shards[shard] = gid
 	cfg.Num++
 	sc.configs = append(sc.configs, cfg)
+	sc.lastReb = time.Now()
 	return cfg
 }
 
 func (sc *ShardCtrler) applyHeartBeatLocked(gid int, num int, groupload float64) {
 	stat, ok := sc.groupStats[gid]
 	if !ok {
-		stat = &GroupStat{}
+		stat = GroupStat{}
 		sc.groupStats[gid] = stat
 	}
 	if num < stat.ConfigNum {
@@ -313,7 +345,7 @@ func (sc *ShardCtrler) applyHeartBeatLocked(gid int, num int, groupload float64)
 	stat.ConfigNum = num
 	stat.Load = groupload
 	stat.LastBeat = time.Now()
-	fmt.Println(sc.groupStats[gid])
+	sc.groupStats[gid] = stat
 }
 
 func (sc *ShardCtrler) rebalanceLocked(cfg *Config) {
@@ -398,9 +430,10 @@ func (sc *ShardCtrler) restoreFromSnapshot(snapshot []byte) {
 		return
 	}
 	var data struct {
-		Configs []Config
-		LastSeq map[int64]int
-		LastCmd map[int64]OpResult
+		Configs    []Config
+		LastSeq    map[int64]int
+		LastCmd    map[int64]OpResult
+		OperatorID int
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
@@ -410,6 +443,7 @@ func (sc *ShardCtrler) restoreFromSnapshot(snapshot []byte) {
 	sc.configs = data.Configs
 	sc.lastSeq = data.LastSeq
 	sc.lastCmd = data.LastCmd
+	sc.OperatorID = data.OperatorID
 }
 
 func (sc *ShardCtrler) maybeTakeSnapshot(index int) {
@@ -434,17 +468,20 @@ func (sc *ShardCtrler) maybeTakeSnapshot(index int) {
 	for cid, cmd := range sc.lastCmd {
 		scCopyLastCmd[cid] = cmd
 	}
+	scCopyOPeratorid := sc.OperatorID
 	sc.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(struct {
-		Configs []Config
-		LastSeq map[int64]int
-		LastCmd map[int64]OpResult
+		Configs    []Config
+		LastSeq    map[int64]int
+		LastCmd    map[int64]OpResult
+		OperatorID int
 	}{
-		Configs: scCopyConfigs,
-		LastSeq: scCopyLastSeq,
-		LastCmd: scCopyLastCmd,
+		Configs:    scCopyConfigs,
+		LastSeq:    scCopyLastSeq,
+		LastCmd:    scCopyLastCmd,
+		OperatorID: scCopyOPeratorid,
 	})
 	sc.rf.Snapshot(lastApplied, w.Bytes())
 }
@@ -473,31 +510,39 @@ func (sc *ShardCtrler) apply() {
 		case Op:
 			op := cmd
 			var res OpResult
-			last, exists := sc.lastSeq[op.ClientID]
-			if exists && op.Seq <= last {
-				res = sc.lastCmd[op.ClientID]
-			} else {
-				if op.Type == OpQuery {
-					cfg := sc.queryConfigLocked(op.Num)
-					res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
+			if op.Type == OpMove {
+				if op.OperatorID <= sc.OperatorID {
+					res = OpResult{Err: OK}
 				} else {
-					switch op.Type {
-					case OpJoin:
-						_ = sc.applyJoinLocked(op.GID)
-					case OpLeave:
-						_ = sc.applyLeaveLocked(op.GID)
-					case OpMove:
-						_ = sc.applyMoveLocked(op.Shard, op.GID)
-					case OpHeartBeat:
-						sc.applyHeartBeatLocked(op.GID, op.Num, op.GroupLoad)
-					default:
-						sc.mu.Unlock()
-						panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
-					}
-					res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+					_ = sc.applyMoveLocked(op.Shard, op.GID)
+					sc.OperatorID = op.OperatorID
+					res = OpResult{Err: OK}
 				}
-				sc.lastSeq[op.ClientID] = op.Seq
-				sc.lastCmd[op.ClientID] = res
+			} else {
+				last, exists := sc.lastSeq[op.ClientID]
+				if exists && op.Seq <= last {
+					res = sc.lastCmd[op.ClientID]
+				} else {
+					if op.Type == OpQuery {
+						cfg := sc.queryConfigLocked(op.Num)
+						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
+					} else {
+						switch op.Type {
+						case OpJoin:
+							_ = sc.applyJoinLocked(op.GID)
+						case OpLeave:
+							_ = sc.applyLeaveLocked(op.GID)
+						case OpHeartBeat:
+							sc.applyHeartBeatLocked(op.GID, op.Num, op.GroupLoad)
+						default:
+							sc.mu.Unlock()
+							panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
+						}
+						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+					}
+					sc.lastSeq[op.ClientID] = op.Seq
+					sc.lastCmd[op.ClientID] = res
+				}
 			}
 			if ch, ok := sc.waitCh[msg.CommandIndex]; ok {
 				select {
@@ -517,6 +562,80 @@ func (sc *ShardCtrler) apply() {
 	}
 }
 
+func (sc *ShardCtrler) TickLoop() {
+	ticker := time.NewTicker(MonitorInterval)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		sc.mu.Lock()
+		_, isleader := sc.rf.GetState()
+		if !isleader {
+			sc.mu.Unlock()
+			continue
+		}
+		stats := make(map[int]GroupStat)
+		for k, v := range sc.groupStats {
+			stats[k] = v
+		}
+		lastReb := sc.lastReb
+		OperatorID := sc.OperatorID + 1
+		lastconfig := copyConfig(sc.configs[len(sc.configs)-1])
+		sc.mu.Unlock()
+		if time.Now().Sub(lastReb) < cooldown {
+			continue
+		}
+		availableGroups := make(map[int]GroupStat)
+		for gid := range lastconfig.Groups {
+			stat, ok := stats[gid]
+			if !ok || time.Now().Sub(stat.LastBeat) > HeartbeatTimeout {
+				continue
+			} else {
+				availableGroups[gid] = stat
+			}
+		}
+		if len(availableGroups) < 2 {
+			continue
+		}
+		var maxGID, minGID int
+		maxLoad := -1.0
+		minLoad := 1e18
+		for gid, stat := range availableGroups {
+			w := sc.configWeight(stat)
+			realLoad := stat.Load * w
+			if realLoad > maxLoad {
+				maxLoad = realLoad
+				maxGID = gid
+			}
+			if realLoad < minLoad {
+				minLoad = realLoad
+				minGID = gid
+			}
+		}
+		if maxLoad-minLoad < threshold {
+			continue
+		}
+		shardToMove := -1
+		for i := 0; i < NShards; i++ {
+			if lastconfig.Shards[i] == maxGID {
+				shardToMove = i
+				break
+			}
+		}
+		if shardToMove == -1 {
+			continue
+		}
+		fmt.Printf("Auto rebalance: move shard %d from group %d to group %d\n",
+			shardToMove, maxGID, minGID)
+		fmt.Println(availableGroups)
+		moveargs := MoveArgs{
+			Shard:      shardToMove,
+			GID:        minGID,
+			OperatorID: OperatorID,
+		}
+		go sc.move(moveargs)
+	}
+}
+
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
 	res, err := sc.submit(Op{Type: OpQuery,
 		ClientID: args.ClientID, Seq: args.Seq, Num: args.Num})
@@ -527,12 +646,9 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
 	return nil
 }
 
-func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) error {
-	_, err := sc.submit(Op{Type: OpMove,
-		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID,
-		Shard: args.Shard})
-	reply.Err = err
-	return nil
+func (sc *ShardCtrler) move(args MoveArgs) {
+	sc.submit(Op{Type: OpMove,
+		OperatorID: args.OperatorID, GID: args.GID, Shard: args.Shard})
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) error {

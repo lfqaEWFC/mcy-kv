@@ -105,6 +105,7 @@ type DeleteShardReply struct {
 	Err Err
 }
 
+// 这里应该写一个心跳机制，定期清理过期的seq和cmd,否则会堆积大量的seq和cmd
 type ShardServer struct {
 	lastApplied   int
 	maxraftstate  int
@@ -355,9 +356,7 @@ func (shardkv *ShardServer) applier() {
 			fmt.Printf("error command type...\n")
 			continue
 		}
-		fmt.Printf("GID %d: APPILER PREPARES TO GET LOCK\n", shardkv.gid)
 		shardkv.mu.Lock()
-		fmt.Printf("GID %d: APPILER GET LOCK\n", shardkv.gid)
 		switch op := msg.Command.(type) {
 		case Op:
 			if op.Type == "ConfigUpdate" {
@@ -697,8 +696,6 @@ func (shardkv *ShardServer) TickLoop(tickInterval time.Duration) {
 		shardkv.stats.Tick()
 		load := shardkv.stats.emaQPS
 		shardkv.emaQPS = load
-		fmt.Printf("gid %d emaQPS: ", shardkv.gid)
-		fmt.Println(shardkv.stats.emaQPS)
 		shardkv.mu.Unlock()
 	}
 }
