@@ -156,54 +156,14 @@ func NewServer(rf raftapi.Raft, applyCh chan raftapi.ApplyMsg, maxraftstate int)
 	cfg1 := Config{
 		Num: 1,
 		Shards: [NShards]int{
+			1, 1, 1,
+			2, 2, 2,
 			3, 3, 3,
-			3, 3, 3,
-			3, 3, 3,
-			3,
+			1,
 		},
 		Groups: groupConfig,
 	}
-
 	sc.configs = append(sc.configs, cfg1)
-
-	cfg2 := Config{
-		Num: 2,
-		Shards: [NShards]int{
-			1, 1, 1,
-			1, 1, 1,
-			1, 1, 1,
-			1,
-		},
-		Groups: groupConfig,
-	}
-
-	sc.configs = append(sc.configs, cfg2)
-
-	cfg3 := Config{
-		Num: 3,
-		Shards: [NShards]int{
-			2, 2, 2,
-			2, 2, 2,
-			2, 2, 2,
-			2,
-		},
-		Groups: groupConfig,
-	}
-
-	sc.configs = append(sc.configs, cfg3)
-
-	cfg4 := Config{
-		Num: 4,
-		Shards: [NShards]int{
-			1, 1, 1,
-			2, 2, 2,
-			3, 3, 3,
-			1,
-		},
-		Groups: groupConfig,
-	}
-
-	sc.configs = append(sc.configs, cfg4)
 
 	go sc.apply()
 	go sc.TickLoop()
@@ -245,6 +205,7 @@ func (sc *ShardCtrler) submit(op Op) (OpResult, Err) {
 	index, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		sc.mu.Unlock()
+		fmt.Printf("NOT LEADER: submit op %v failed\n", op)
 		return OpResult{}, ErrWrongLeader
 	}
 	ch := sc.getWaitCh(index)
@@ -260,6 +221,7 @@ func (sc *ShardCtrler) submit(op Op) (OpResult, Err) {
 	case res := <-ch:
 		if op.Type != OpMove {
 			if res.ClientID != op.ClientID || res.Seq != op.Seq {
+				fmt.Printf("RES CH: submit %v receive %v\n", op, res)
 				return OpResult{}, ErrWrongLeader
 			}
 		}
@@ -521,25 +483,20 @@ func (sc *ShardCtrler) apply() {
 			} else {
 				last, exists := sc.lastSeq[op.ClientID]
 				if exists && op.Seq <= last {
-					res = sc.lastCmd[op.ClientID]
-				} else {
-					if op.Type == OpQuery {
-						cfg := sc.queryConfigLocked(op.Num)
-						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq, Config: cfg}
-					} else {
-						switch op.Type {
-						case OpJoin:
-							_ = sc.applyJoinLocked(op.GID)
-						case OpLeave:
-							_ = sc.applyLeaveLocked(op.GID)
-						case OpHeartBeat:
-							sc.applyHeartBeatLocked(op.GID, op.Num, op.GroupLoad)
-						default:
-							sc.mu.Unlock()
-							panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
-						}
-						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+					if op.Seq == last {
+						res = sc.lastCmd[op.ClientID]
 					}
+				} else {
+					switch op.Type {
+					case OpJoin:
+						_ = sc.applyJoinLocked(op.GID)
+					case OpLeave:
+						_ = sc.applyLeaveLocked(op.GID)
+					default:
+						sc.mu.Unlock()
+						panic(fmt.Sprintf("apply unknown optype: %s", op.Type))
+					}
+					res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
 					sc.lastSeq[op.ClientID] = op.Seq
 					sc.lastCmd[op.ClientID] = res
 				}
@@ -637,12 +594,15 @@ func (sc *ShardCtrler) TickLoop() {
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) error {
-	res, err := sc.submit(Op{Type: OpQuery,
-		ClientID: args.ClientID, Seq: args.Seq, Num: args.Num})
-	reply.Err = err
-	if err == OK {
-		reply.Config = res.Config
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	_, isLeader := sc.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return nil
 	}
+	reply.Config = sc.queryConfigLocked(args.Num)
+	reply.Err = OK
 	return nil
 }
 
@@ -666,9 +626,14 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) error {
 }
 
 func (sc *ShardCtrler) Heartbeat(args *HeartBeatArgs, reply *HeartBeatReply) error {
-	_, err := sc.submit(Op{Type: OpHeartBeat,
-		ClientID: args.ClientID, Seq: args.Seq, GID: args.GID,
-		Num: args.Num, GroupLoad: args.GroupLoad})
-	reply.Err = err
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	_, isLeader := sc.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return nil
+	}
+	sc.applyHeartBeatLocked(args.GID, args.Num, args.GroupLoad)
+	reply.Err = OK
 	return nil
 }

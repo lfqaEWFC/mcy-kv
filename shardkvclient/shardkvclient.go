@@ -75,7 +75,6 @@ func (ck *Clerk) Put(key string, value string) {
 		if !ok {
 			fmt.Printf("rpc fail,change leader\n")
 			ck.leader = (ck.leader + 1) % len(servers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		fmt.Printf("Err is %s\n", reply.Err)
@@ -101,7 +100,6 @@ func (ck *Clerk) Put(key string, value string) {
 		default:
 			fmt.Printf("unexpected error: %s\n", reply.Err)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -128,7 +126,6 @@ func (ck *Clerk) Get(key string) string {
 		if !ok {
 			fmt.Printf("rpc fail,change leader\n")
 			ck.leader = (ck.leader + 1) % len(servers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -153,6 +150,5 @@ func (ck *Clerk) Get(key string) string {
 		default:
 			fmt.Printf("unexpected error: %s\n", reply.Err)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }

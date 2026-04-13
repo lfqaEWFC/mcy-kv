@@ -53,14 +53,12 @@ func (c *Client) Query(num int) shardctrler.Config {
 		rpcClient, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		err = rpcClient.Call("ShardCtrler.Query", &args, &reply)
 		rpcClient.Close()
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -68,9 +66,6 @@ func (c *Client) Query(num int) shardctrler.Config {
 			return reply.Config
 		case shardctrler.ErrWrongLeader:
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
-		case shardctrler.ErrTimeout:
-			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error : %v\n", reply.Err)
 			return reply.Config
@@ -93,14 +88,12 @@ func (c *Client) Leave(targetGID int) bool {
 		rpcClient, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		err = rpcClient.Call("ShardCtrler.Leave", &args, &reply)
 		rpcClient.Close()
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -108,7 +101,6 @@ func (c *Client) Leave(targetGID int) bool {
 			return true
 		case shardctrler.ErrWrongLeader:
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
 			time.Sleep(100 * time.Millisecond)
 		default:
@@ -133,14 +125,12 @@ func (c *Client) Join(targetGID int) bool {
 		rpcClient, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		err = rpcClient.Call("ShardCtrler.Join", &args, &reply)
 		rpcClient.Close()
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -148,7 +138,6 @@ func (c *Client) Join(targetGID int) bool {
 			return true
 		case shardctrler.ErrWrongLeader:
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 		case shardctrler.ErrTimeout:
 			time.Sleep(100 * time.Millisecond)
 		default:
@@ -175,14 +164,12 @@ func (c *Client) Heartbeat(gid int, configNum int, load float64) error {
 		rpcClient, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		err = rpcClient.Call("ShardCtrler.Heartbeat", &args, &reply)
 		rpcClient.Close()
 		if err != nil {
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		switch reply.Err {
@@ -190,9 +177,6 @@ func (c *Client) Heartbeat(gid int, configNum int, load float64) error {
 			return nil
 		case shardctrler.ErrWrongLeader:
 			id = (id + 1) % len(c.peers)
-			time.Sleep(50 * time.Millisecond)
-		case shardctrler.ErrTimeout:
-			time.Sleep(100 * time.Millisecond)
 		default:
 			fmt.Printf("unexpected error: %v\n", reply.Err)
 			return nil
