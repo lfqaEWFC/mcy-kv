@@ -478,10 +478,21 @@ func (shardkv *ShardServer) applier() {
 						panic("KVServer: unknown operation type")
 					}
 				} else {
-					if op.Type == "Get" {
-						res = shardkv.lastshardcmd[shard][op.ClientID]
+					if op.Seq == last {
+						if op.Type == "Get" {
+							res = shardkv.lastshardcmd[shard][op.ClientID]
+						} else {
+							res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+						}
 					} else {
-						res = OpResult{Err: OK, ClientID: op.ClientID, Seq: op.Seq}
+						panic(fmt.Sprintf(
+							"[FATAL] Out-of-order client request :\n"+
+								"1. client is not single-threaded\n"+
+								"2. duplicate ClientID reuse\n"+
+								"3. broken retry semantics\n"+
+								"client=%d seq=%d last=%d op=%s",
+							op.ClientID, op.Seq, last, op.Type,
+						))
 					}
 				}
 				ch := shardkv.getWaitCh(msg.CommandIndex)
@@ -926,3 +937,9 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 	}
 	return nil
 }
+
+// 1. 目前的实现中，waitCh 超时会有内存泄漏的问题 -- step1
+// 2. client 相关的监测少，可能会有client相关数据堆积的情况 -- step2
+// 3. 写一个shard级别的锁，同时在appiler减少锁的粒度，提高性能 -- step3
+// 4. 读写分离，读请求不经过raft，直接返回结果，写请求经过raft -- step4（重要！！！！）
+// 注意： 在合适的时机解决协程如果超时就无法被清理，可能会有内存泄漏的问题

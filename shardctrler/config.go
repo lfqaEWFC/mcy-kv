@@ -485,6 +485,15 @@ func (sc *ShardCtrler) apply() {
 				if exists && op.Seq <= last {
 					if op.Seq == last {
 						res = sc.lastCmd[op.ClientID]
+					} else {
+						panic(fmt.Sprintf(
+							"[FATAL] Out-of-order client request :\n"+
+								"1. client is not single-threaded\n"+
+								"2. duplicate ClientID reuse\n"+
+								"3. broken retry semantics\n"+
+								"client=%d seq=%d last=%d op=%s",
+							op.ClientID, op.Seq, last, op.Type,
+						))
 					}
 				} else {
 					switch op.Type {
