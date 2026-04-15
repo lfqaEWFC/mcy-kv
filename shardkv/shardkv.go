@@ -157,7 +157,6 @@ func call(addr string, rpcname string, args interface{}, reply interface{}) bool
 
 	done := make(chan error, 1)
 
-	//协程如果超时就无法被清理，可能会有内存泄漏的问题
 	go func() {
 		done <- c.Call(rpcname, args, reply)
 	}()
@@ -166,6 +165,7 @@ func call(addr string, rpcname string, args interface{}, reply interface{}) bool
 	case err := <-done:
 		return err == nil
 	case <-time.After(500 * time.Millisecond):
+		c.Close()
 		return false
 	}
 }
@@ -211,7 +211,6 @@ func (shardkv *ShardServer) getWaitCh(index int) chan OpResult {
 	return ch
 }
 
-// 目前的实现中，waitCh 超时会有内存泄漏的问题
 func (shardkv *ShardServer) removeWaitCh(index int) {
 	delete(shardkv.waitCh, index)
 }
@@ -437,10 +436,11 @@ func (shardkv *ShardServer) applier() {
 						fmt.Printf("gid : %d\n", shardkv.gid)
 						fmt.Println(shardkv.config)
 					}
-					ch := shardkv.getWaitCh(msg.CommandIndex)
-					select {
-					case ch <- OpResult{}:
-					default:
+					if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
+						select {
+						case ch <- OpResult{}:
+						default:
+						}
 					}
 				}
 			} else {
@@ -495,10 +495,11 @@ func (shardkv *ShardServer) applier() {
 						))
 					}
 				}
-				ch := shardkv.getWaitCh(msg.CommandIndex)
-				select {
-				case ch <- res:
-				default:
+				if ch, ok := shardkv.waitCh[msg.CommandIndex]; ok {
+					select {
+					case ch <- res:
+					default:
+					}
 				}
 			}
 		case raftapi.NoOp:
@@ -895,7 +896,11 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 	}
 	if args.ConfigNum != shardkv.pendingConfig.Num {
 		shardkv.mu.Unlock()
-		reply.Err = ErrWrongGroup
+		if shardkv.pendingConfig.Num < args.ConfigNum {
+			reply.Err = ErrWrongGroup
+		} else {
+			reply.Err = OK
+		}
 		return nil
 	}
 	shard := args.Shard
@@ -933,13 +938,18 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 		reply.Err = OK
 
 	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
+		shardkv.mu.Lock()
+		defer shardkv.mu.Unlock()
+		if args.ConfigNum < shardkv.pendingConfig.Num ||
+			shardkv.shardState[shard] != BePulling {
+			reply.Err = OK
+		} else {
+			reply.Err = ErrTimeout
+		}
 	}
 	return nil
 }
 
-// 1. 目前的实现中，waitCh 超时会有内存泄漏的问题 -- step1
-// 2. client 相关的监测少，可能会有client相关数据堆积的情况 -- step2
-// 3. 写一个shard级别的锁，同时在appiler减少锁的粒度，提高性能 -- step3
-// 4. 读写分离，读请求不经过raft，直接返回结果，写请求经过raft -- step4（重要！！！！）
-// 注意： 在合适的时机解决协程如果超时就无法被清理，可能会有内存泄漏的问题
+// 1. client 相关的监测少，可能会有client相关数据堆积的情况 -- step n？
+// 2. 写一个shard级别的锁，同时在appiler减少锁的粒度，提高性能 -- step1
+// 3. 读写分离，读请求不经过raft，直接返回结果，写请求经过raft -- step2（重要！！！！）
