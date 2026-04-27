@@ -895,12 +895,12 @@ func (shardkv *ShardServer) DeleteShard(args *DeleteShardArgs, reply *DeleteShar
 		return nil
 	}
 	if args.ConfigNum != shardkv.pendingConfig.Num {
-		shardkv.mu.Unlock()
 		if shardkv.pendingConfig.Num < args.ConfigNum {
 			reply.Err = ErrWrongGroup
 		} else {
 			reply.Err = OK
 		}
+		shardkv.mu.Unlock()
 		return nil
 	}
 	shard := args.Shard
